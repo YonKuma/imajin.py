@@ -7,7 +7,7 @@
 
 ## Features
 
-- Search across `.epub` (ebooks) and `.mokuro` (manga) files
+- Search across unencrypted `.epub` (ebooks) and `.mokuro` (manga) files
 - Supports fuzzy matching for Japanese conjugations (optional)
 - Supports searching individual words or phrases
 - Structured output: text, markdown, or JSON
