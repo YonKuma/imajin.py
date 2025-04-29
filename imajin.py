@@ -303,33 +303,6 @@ class OutputManager:
             print(f"# {volume_name}")
             print()
 
-    def _print_match(self, match: dict[str, Any]) -> None:
-        """Print a single buffered match."""
-        for field_name, field_value in match.items():
-            if field_name == 'Volume':
-                continue  # Volume is handled separately
-
-            if field_name == 'Snippet' and isinstance(field_value, tuple):
-                snippet, match_start, match_end = field_value
-                highlighted = self._highlight_snippet(snippet, match_start, match_end)
-                self._print_field(field_name, highlighted)
-            else:
-                self._print_field(field_name, field_value)
-
-    def _highlight_snippet(self, snippet: str, match_start: int, match_end: int) -> str:
-        """Highlight a match inside a snippet."""
-        if self.mode == 'markdown':
-            return snippet[:match_start] + "**" + snippet[match_start:match_end] + "**" + snippet[match_end:]
-        else:  # text mode
-            return snippet[:match_start] + "\033[1m" + snippet[match_start:match_end] + "\033[0m" + snippet[match_end:]
-
-    def _print_field(self, field_name: str, field_value: str) -> None:
-        """Print a single field."""
-        if self.mode == 'markdown':
-            print(f"**{field_name}**: {field_value}  ")
-        else:
-            print(f"{field_name}: {field_value}")
-
 class Result:
     def __init__(self, volume: 'Volume', section: 'Section', snippet: tuple[str, int, int], absolute_position: int):
         self.volume = volume
