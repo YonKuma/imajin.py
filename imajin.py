@@ -22,6 +22,7 @@ A search tool for .epub and .mokuro files supporting exact and fuzzy matching.
 
 import argparse
 import zipfile
+import posixpath
 import os
 import re
 import sys
@@ -37,7 +38,7 @@ try:
     mecab = MeCab.Tagger()
 except (ImportError, RuntimeError) as e:
     mecab = None
-    print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
+    print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.", file=sys.stderr)
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
@@ -105,8 +106,12 @@ class EpubVolume(Volume):
             href = self.manifest.get(idref)
             if not href:
                 continue
-            full_path = os.path.join(os.path.dirname(self.rootfile_path), href)
-            content_raw = zip_file.read(full_path)
+            full_path = posixpath.join(posixpath.dirname(self.rootfile_path), href)
+            try:
+                content_raw = zip_file.read(full_path)
+            except KeyError as e:
+                print(f"[WARNING] Missing document '{full_path}' in EPUB: {self.get_filename()}\n\tResults may be incomplete", file=sys.stderr)
+                continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
             chapters.append(EpubChapter(self, href, raw_text, content))
@@ -168,7 +173,7 @@ class EpubChapter(Section):
             self._cached_chapter_name = headings[0].get_text(strip=True)
             return self._cached_chapter_name
 
-        href_base = os.path.basename(self.href).split('#')[0]
+        href_base = posixpath.basename(self.href).split('#')[0]
         if (href_base, None) in id_to_label:
             self._cached_chapter_name = id_to_label[(href_base, None)]
             return self._cached_chapter_name
@@ -207,8 +212,11 @@ class MokuroVolume(Volume):
 
     def __init__(self, path: str):
         self.path: str = path
-        with open(path, 'r', encoding='utf-8') as f:
-            self.data: dict = json.load(f)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                self.data: dict = json.load(f)
+        except (FileNotFoundError, PermissionError, OSError, JSONDecodeError) as e:
+            raise VolumeLoadError(f"Failed to load Mokuro file '{path}': {e}") from e
         self.pages: List[MokuroPage] = [MokuroPage(self, i, page_data) for i, page_data in enumerate(self.data['pages'])]
         self.total_text_length: int = sum(len(page.get_text()) for page in self.pages)
 
@@ -498,9 +506,20 @@ def extract_first_text_block(body: BeautifulSoup) -> Optional[str]:
 
 def parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
     """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
-    container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
-    rootfile_path = container.find('rootfile')['full-path']
-    opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
+    try:
+        container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
+    except KeyError as e:
+        raise VolumeLoadError("Missing META-INF/container.xml in EPUB archive") from e
+
+    try:
+        rootfile_path = container.find('rootfile')['full-path']
+    except (AttributeError, TypeError, KeyError) as e:
+        raise VolumeLoadError("Malformed container.xml: could not find rootfile path") from e
+    
+    try:
+        opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
+    except KeyError as e:
+        raise VolumeLoadError(f"Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
     manifest = {item['id']: item['href'] for item in opf.find_all('item')}
     spine = [item['idref'] for item in opf.find_all('itemref')]
@@ -513,16 +532,19 @@ def parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dic
             break
 
     if ncx_path:
-        ncx_full_path = os.path.join(os.path.dirname(rootfile_path), ncx_path)
-        ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-        for navpoint in ncx.find_all('navPoint'):
-            src = navpoint.content['src']
-            label = navpoint.navLabel.text.strip()
-            if '#' in src:
-                file_part, frag = src.split('#', 1)
-                id_to_label[(os.path.basename(file_part), frag)] = label
-            else:
-                id_to_label[(os.path.basename(src), None)] = label
+        ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
+        try:
+            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+            for navpoint in ncx.find_all('navPoint'):
+                src = navpoint.content['src']
+                label = navpoint.navLabel.text.strip()
+                if '#' in src:
+                    file_part, frag = src.split('#', 1)
+                    id_to_label[(posixpath.basename(file_part), frag)] = label
+                else:
+                    id_to_label[(posixpath.basename(src), None)] = label
+        except (KeyError, AttributeError, TypeError):
+            pass # Silently allow a failed ncx read
 
     return manifest, spine, id_to_label, rootfile_path
 
@@ -605,23 +627,27 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
 if __name__ == '__main__':
     search_word, target_path, use_fuzzy, recursive, output_format = parse_args()
 
-    if os.path.isdir(target_path):
-        if recursive:
-            paths = []
-            for root, dirs, files in os.walk(target_path):
-                for f in files:
-                    if f.endswith(('.epub', '.mokuro')):
-                        paths.append(os.path.join(root, f))
+    try:
+        if os.path.isdir(target_path):
+            if recursive:
+                paths = []
+                for root, dirs, files in os.walk(target_path):
+                    for f in files:
+                        if f.endswith(('.epub', '.mokuro')):
+                            paths.append(os.path.join(root, f))
+            else:
+                paths = [
+                    os.path.join(target_path, f)
+                    for f in os.listdir(target_path)
+                    if f.endswith(('.epub', '.mokuro'))
+                ]
+        elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
+            paths = [target_path]
         else:
-            paths = [
-                os.path.join(target_path, f)
-                for f in os.listdir(target_path)
-                if f.endswith(('.epub', '.mokuro'))
-            ]
-    elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
-        paths = [target_path]
-    else:
-        print(f"Error: '{target_path}' is not a valid file or directory.")
+            print(f"Error: '{target_path}' is not a valid file or directory.", file=sys.stderr)
+            sys.exit(1)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        print(f"[ERROR] Failed accessing path '{target_path}': {e}", file=sys.stderr)
         sys.exit(1)
 
     output_manager = OutputManager(mode=output_format)
