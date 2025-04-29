@@ -29,7 +29,7 @@ import json
 from collections import defaultdict
 from typing import List, Optional, Any
 from abc import ABC, abstractmethod
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -152,35 +152,38 @@ class EpubChapter(Section):
         spine_docs = self.volume.get_sections()
         idx_in_spine = spine_docs.index(self)
 
+        # 1. Check whether the previous file is a chapter title
         if idx_in_spine > 0:
             prev_doc = spine_docs[idx_in_spine - 1]
             prev_content = prev_doc.content
             if prev_content:
                 prev_body = prev_content.find('body')
-                if prev_body:
-                    full_text = ''.join(prev_body.stripped_strings).strip()
-                    for tag in prev_body.descendants:
-                        if tag.name in ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                            pure_text = ''.join(tag.stripped_strings).strip()
-                            if pure_text and self.is_innermost_block(tag):
-                                if pure_text == full_text:
-                                    self._cached_chapter_name = pure_text
-                                    return pure_text
+                if prev_body and (first_tag := get_first_innermost_block(prev_body)):
+                    # If the previous file contains only a
+                    # single block of text that constitutes the full file
+                    full_text = ' '.join(prev_body.stripped_strings).strip()
+                    tag_text = ' '.join(first_tag.stripped_strings).strip()
+                    if tag_text == full_text:
+                        self._cached_chapter_name = tag_text
+                        return tag_text
 
+        # 2. Check whether there's a heading in the file
         headings = self.content.find_all(re.compile('^h[1-6]$'))
         if headings:
             self._cached_chapter_name = headings[0].get_text(strip=True)
             return self._cached_chapter_name
 
+        # 3. Check whether the toc.ncx had a chapter for the file
         href_base = posixpath.basename(self.href).split('#')[0]
         if (href_base, None) in id_to_label:
             self._cached_chapter_name = id_to_label[(href_base, None)]
             return self._cached_chapter_name
 
+        # 4. Check whether the first text in the file looks like a chapter name
         body = self.content.find('body')
-        if body:
-            first_text = extract_first_text_block(body)
-            if first_text:
+        if body and (first_text_tag := get_first_innermost_block(body)):
+            if self.looks_like_chapter_name(first_text_tag, body):
+                first_text = ' '.join(first_text_tag.stripped_strings).strip()
                 self._cached_chapter_name = first_text
                 return self._cached_chapter_name
 
@@ -188,14 +191,26 @@ class EpubChapter(Section):
         return 'Unknown'
 
     @staticmethod
-    def is_innermost_block(tag: BeautifulSoup) -> bool:
-        block_tags = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-        for child in tag.descendants:
-            if child.name in block_tags:
-                child_text = ''.join(child.stripped_strings).strip()
-                if child_text:
-                    return False
-        return True
+    def looks_like_chapter_name(tag: BeautifulSoup, body: BeautifulSoup) -> bool:
+        """Check whether the tag or any of its descendants has a unique class."""
+        # Step 1: Count all class frequencies in the body
+        class_counts = {}
+        for node in body.find_all(True):
+            if isinstance(node, Tag):
+                cls = node.get('class')
+                if cls:
+                    for c in cls:
+                        class_counts[c] = class_counts.get(c, 0) + 1
+        unique_classes = {c for c, count in class_counts.items() if count == 1}
+
+        # Step 2: Check for unique class on tag or descendants
+        for node in [tag] + list(tag.descendants):
+            if isinstance(node, Tag):
+                cls = node.get('class')
+                if cls and any(c in unique_classes for c in cls):
+                    return True
+
+        return False
 
     def extract_snippet(self, idx: int, length: int) -> tuple[str, int, int]:
         return make_snippet(self.raw_text, idx=idx, length=length)
@@ -484,23 +499,27 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
 
     return snippet, match_start_in_snippet, match_end_in_snippet
 
-def extract_first_text_block(body: BeautifulSoup) -> Optional[str]:
-    """Extract the first meaningful block of text from HTML body."""
-    classes = {}
-    for tag in body.find_all(True):
-        cls = tag.get('class')
-        if cls:
-            for c in cls:
-                classes[c] = classes.get(c, 0) + 1
-    unique_classes = {c for c, count in classes.items() if count == 1}
+def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
+    """Return the first innermost block-level tag with meaningful text."""
+    block_tags = {'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+
     for tag in body.descendants:
-        if tag.name and tag.string and tag.string.strip():
-            parent = tag.parent
-            cls = parent.get('class')
-            if cls and any(c in unique_classes for c in cls):
-                return tag.string.strip()
-            else:
-                return None
+        if tag.name not in block_tags:
+            continue
+
+        pure_text = ''.join(tag.stripped_strings).strip()
+        if not pure_text:
+            continue
+
+        # Check if tag contains any nested block-level tags with content
+        for child in tag.descendants:
+            if child.name in block_tags:
+                child_text = ''.join(child.stripped_strings).strip()
+                if child_text:
+                    break
+        else:
+            return tag  # Return the full tag, not the text
+
     return None
 
 def parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
