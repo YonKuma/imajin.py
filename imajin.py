@@ -263,7 +263,7 @@ class MokuroPage(Section):
             lines = block.get('lines', [])
             block_text = ' '.join(lines)
             blocks.append(block_text)
-        return '\n'.join(blocks)
+        return '\t'.join(blocks)
 
     def get_text(self) -> str:
         """Return the raw text of the section."""
@@ -468,7 +468,7 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
     if idx == -1:
         return '', 0, 0
 
-    sentence_endings = set('。．？！!?')
+    sentence_endings = set('。．？！!?\n')
     text_length = len(text)
 
     # Search backward for start of the sentence
@@ -493,7 +493,7 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
         forward_steps += 1
     snippet_end = min(text_length, snippet_end)
 
-    snippet = text[snippet_start:snippet_end]
+    snippet = text[snippet_start:snippet_end].strip()
     match_start_in_snippet = idx - snippet_start
     match_end_in_snippet = match_start_in_snippet + length
 
