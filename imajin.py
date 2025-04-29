@@ -93,12 +93,12 @@ class EpubVolume(Volume):
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
                 self.manifest, self.spine, self.id_to_label, self.rootfile_path = parse_epub_metadata(zf)
-                self.chapters, self.total_text_length = self._extract_spine_documents(zf)
+                self.sections, self.total_text_length = self._extract_spine_documents(zf)
         except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
             raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
 
-    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[List['EpubChapter'], int]:
-        chapters = []
+    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[List['EpubSection'], int]:
+        sections = []
         total_text_length = 0
 
         for idref in self.spine:
@@ -113,14 +113,14 @@ class EpubVolume(Volume):
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
-            chapters.append(EpubChapter(self, href, raw_text, content))
+            sections.append(EpubSection(self, href, raw_text, content))
             total_text_length += len(raw_text)
 
-        return chapters, total_text_length
+        return sections, total_text_length
 
-    def get_sections(self) -> List['EpubChapter']:
+    def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
-        return self.chapters
+        return self.sections
 
     def get_total_length(self) -> int:
         """Return total text length of the volume."""
@@ -130,18 +130,18 @@ class EpubVolume(Volume):
         """Return the base filename of the volume."""
         return os.path.basename(self.epub_path)
 
-    def get_previous_chapter(self, chapter: 'EpubChapter') -> Optional['EpubChapter']:
+    def get_previous_chapter(self, chapter: 'EpubSection') -> Optional['EpubSection']:
         """Given a chapter, return the previous chapter in spine order, or None if first."""
         try:
-            idx = self.chapters.index(chapter)
+            idx = self.sections.index(chapter)
             if idx > 0:
-                return self.chapters[idx - 1]
+                return self.sections[idx - 1]
             else:
                 return None
         except ValueError:
             return None
 
-class EpubChapter(Section):
+class EpubSection(Section):
     """Section class representing a chapter inside an EPUB volume."""
 
     def __init__(self, volume: EpubVolume, href: str, raw_text: str, content: BeautifulSoup):
@@ -155,7 +155,7 @@ class EpubChapter(Section):
         """Return the raw text of the section."""
         return self.raw_text
 
-    def get_previous_chapter(self) -> Optional['EpubChapter']:
+    def get_previous_chapter(self) -> Optional['EpubSection']:
         """Return the previous chapter in the volume, if any."""
         return self.volume.get_previous_chapter(self)
 
@@ -181,7 +181,7 @@ class EpubChapter(Section):
                 self._cached_chapter_name = first_text
                 return self._cached_chapter_name
 
-        # 3. Check if the previous chapter has a name, in case files split between chapters
+        # 3. Check if the previous section has a name, in case files split between chapters
         if previous_chapter := self.get_previous_chapter():
             if chapter_name := previous_chapter.find_chapter_name():
                 self._cached_chapter_name = chapter_name
