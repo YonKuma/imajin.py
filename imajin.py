@@ -397,6 +397,8 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
         surface, features = line.split('\t')
         features_list = features.split(',')
         base = features_list[6] if len(features_list) > 6 else surface
+        if base == '*':
+            return -1, 0
         search_bases.append(base)
 
     if not search_bases:
