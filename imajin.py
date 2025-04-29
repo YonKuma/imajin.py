@@ -95,7 +95,7 @@ class EpubVolume(Volume):
                 self.manifest, self.spine, self.id_to_label, self.rootfile_path = parse_epub_metadata(zf)
                 self.chapters, self.total_text_length = self._extract_spine_documents(zf)
         except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
-            raise VolumeLoadError(f"Failed to load EPUB '{path}': {e}") from e
+            raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
 
     def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[List['EpubChapter'], int]:
         chapters = []
@@ -130,6 +130,17 @@ class EpubVolume(Volume):
         """Return the base filename of the volume."""
         return os.path.basename(self.epub_path)
 
+    def get_previous_chapter(self, chapter: 'EpubChapter') -> Optional['EpubChapter']:
+        """Given a chapter, return the previous chapter in spine order, or None if first."""
+        try:
+            idx = self.chapters.index(chapter)
+            if idx > 0:
+                return self.chapters[idx - 1]
+            else:
+                return None
+        except ValueError:
+            return None
+
 class EpubChapter(Section):
     """Section class representing a chapter inside an EPUB volume."""
 
@@ -144,6 +155,10 @@ class EpubChapter(Section):
         """Return the raw text of the section."""
         return self.raw_text
 
+    def get_previous_chapter(self) -> Optional['EpubChapter']:
+        """Return the previous chapter in the volume, if any."""
+        return self.volume.get_previous_chapter(self)
+
     def find_chapter_name(self) -> str:
         if self._cached_chapter_name is not None:
             return self._cached_chapter_name
@@ -152,34 +167,13 @@ class EpubChapter(Section):
         spine_docs = self.volume.get_sections()
         idx_in_spine = spine_docs.index(self)
 
-        # 1. Check whether the previous file is a chapter title
-        if idx_in_spine > 0:
-            prev_doc = spine_docs[idx_in_spine - 1]
-            prev_content = prev_doc.content
-            if prev_content:
-                prev_body = prev_content.find('body')
-                if prev_body and (first_tag := get_first_innermost_block(prev_body)):
-                    # If the previous file contains only a
-                    # single block of text that constitutes the full file
-                    full_text = ' '.join(prev_body.stripped_strings).strip()
-                    tag_text = ' '.join(first_tag.stripped_strings).strip()
-                    if tag_text == full_text:
-                        self._cached_chapter_name = tag_text
-                        return tag_text
-
-        # 2. Check whether there's a heading in the file
-        headings = self.content.find_all(re.compile('^h[1-6]$'))
-        if headings:
-            self._cached_chapter_name = headings[0].get_text(strip=True)
-            return self._cached_chapter_name
-
-        # 3. Check whether the toc.ncx had a chapter for the file
+        # 1. Check whether the toc.ncx had a chapter for the file
         href_base = posixpath.basename(self.href).split('#')[0]
         if (href_base, None) in id_to_label:
             self._cached_chapter_name = id_to_label[(href_base, None)]
             return self._cached_chapter_name
 
-        # 4. Check whether the first text in the file looks like a chapter name
+        # 2. Check whether the first text in the file looks like a chapter name
         body = self.content.find('body')
         if body and (first_text_tag := get_first_innermost_block(body)):
             if self.looks_like_chapter_name(first_text_tag, body):
@@ -187,13 +181,21 @@ class EpubChapter(Section):
                 self._cached_chapter_name = first_text
                 return self._cached_chapter_name
 
+        # 3. Check if the previous chapter has a name, in case files split between chapters
+        if previous_chapter := self.get_previous_chapter():
+            if chapter_name := previous_chapter.find_chapter_name():
+                self._cached_chapter_name = chapter_name
+                return self._cached_chapter_name
+
         self._cached_chapter_name = 'Unknown'
         return 'Unknown'
 
     @staticmethod
     def looks_like_chapter_name(tag: BeautifulSoup, body: BeautifulSoup) -> bool:
-        """Check whether the tag or any of its descendants has a unique class."""
-        # Step 1: Count all class frequencies in the body
+        """Return True if the tag or any of its descendants has a unique class or is a heading tag."""
+        heading_tags = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+
+        # Count all class frequencies in the body
         class_counts = {}
         for node in body.find_all(True):
             if isinstance(node, Tag):
@@ -203,9 +205,13 @@ class EpubChapter(Section):
                         class_counts[c] = class_counts.get(c, 0) + 1
         unique_classes = {c for c, count in class_counts.items() if count == 1}
 
-        # Step 2: Check for unique class on tag or descendants
+        # Check the tag and its descendants
         for node in [tag] + list(tag.descendants):
             if isinstance(node, Tag):
+                # Condition 1: tag is a heading
+                if node.name in heading_tags:
+                    return True
+                # Condition 2: tag has a unique class
                 cls = node.get('class')
                 if cls and any(c in unique_classes for c in cls):
                     return True
@@ -493,11 +499,25 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
         forward_steps += 1
     snippet_end = min(text_length, snippet_end)
 
-    snippet = text[snippet_start:snippet_end].strip()
-    match_start_in_snippet = idx - snippet_start
-    match_end_in_snippet = match_start_in_snippet + length
+     # Extract unstripped snippet and calculate position
+    unstripped = text[snippet_start:snippet_end]
+    match_start_in_unstripped = idx - snippet_start
+    match_end_in_unstripped = match_start_in_unstripped + length
 
-    return snippet, match_start_in_snippet, match_end_in_snippet
+    # Strip leading/trailing whitespace and adjust match indexes accordingly
+    leading_ws = len(unstripped) - len(unstripped.lstrip())
+    trailing_ws = len(unstripped) - len(unstripped.rstrip())
+
+    # Adjust indices to stripped version
+    stripped = unstripped.strip()
+    match_start = match_start_in_unstripped - leading_ws
+    match_end = match_end_in_unstripped - leading_ws
+
+    # Clamp indices just in case
+    match_start = max(0, min(len(stripped), match_start))
+    match_end = max(match_start, min(len(stripped), match_end))
+
+    return stripped, match_start, match_end
 
 def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
     """Return the first innermost block-level tag with meaningful text."""
