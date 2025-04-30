@@ -27,6 +27,7 @@ import re
 import sys
 import json
 from collections import defaultdict
+from functools import lru_cache
 from typing import List, Optional, Any
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
@@ -35,7 +36,6 @@ from concurrent.futures import ThreadPoolExecutor
 try:
     import MeCab
     mecab = MeCab.Tagger()
-    mecab.parse('')
 except (ImportError, RuntimeError) as e:
     mecab = None
     print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.", file=sys.stderr)
@@ -385,9 +385,8 @@ class Result:
 
 # Helper functions
 
-_BASE_FORM_INDEX: int | None = None  # Set at runtime
-_FEATURE_SEPARATOR: str = ','
-
+# Cache the function's results since they should be universal
+@lru_cache(maxsize=1)
 def detect_feature_separator_and_index() -> tuple[str, int]:
     """
     Detect the separator character and index for the base form feature.
@@ -424,25 +423,35 @@ def get_base_form(line: str) -> tuple[str, str]:
     """
     Extract surface and base form from a MeCab line, using detected format.
     """
-    global _BASE_FORM_INDEX, _FEATURE_SEPARATOR
 
     parts = line.split('\t', maxsplit=1)
     if len(parts) != 2:
         return line, line
 
     surface, feature_str = parts
+    separator, base_form_index = detect_feature_separator_and_index()
 
-    if _BASE_FORM_INDEX is None:
-        _FEATURE_SEPARATOR, _BASE_FORM_INDEX = detect_feature_separator_and_index()
-
-    fields = feature_str.split(_FEATURE_SEPARATOR)
+    fields = feature_str.split(separator)
     if (
-        len(fields) > _BASE_FORM_INDEX
-        and fields[_BASE_FORM_INDEX] not in ('', '*')
+        len(fields) > base_form_index
+        and fields[base_form_index] not in ('', '*')
     ):
-        return surface, fields[_BASE_FORM_INDEX]
+        return surface, fields[base_form_index]
 
     return surface, surface
+
+def memoize_search_term(func, search_term):
+    """Cache the results of fetching mecab base for the user's search term"""
+    cache = {}
+
+    def wrapper(word):
+        if word == search_term:
+            if word not in cache:
+                cache[word] = func(word)
+            return cache[word]
+        return func(word)
+
+    return wrapper
 
 
 def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
@@ -450,6 +459,7 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     if mecab is None:
         return -1, 0
 
+    # Tokenize the search and fetch bases
     parsed_search = mecab.parse(search_word)
 
     if parsed_search is None:
@@ -467,6 +477,7 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     if not search_bases:
         return -1, 0
 
+    # Tokenize the corpus text to compare bases
     parsed_text = mecab.parse(text)
     if parsed_text is None:
         return -1, 0
@@ -478,6 +489,8 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
         if line == 'EOS' or line.strip() == '':
             continue
         surface, base = get_base_form(line)
+        # Search for the unprocessed text in the original corpus
+        # Workaround to get an accurate text location
         found_pos = text.find(surface, cursor)
         if found_pos == -1:
             return -1, 0
@@ -489,6 +502,7 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
 
     search_length = len(search_bases)
 
+    # Do a sliding window search matching the bases against each other
     for i in range(len(text_tokens) - search_length + 1):
         window_bases = [base for (_, base, _) in text_tokens[i:i + search_length]]
         if window_bases == search_bases:
@@ -504,6 +518,8 @@ def find_matches(text: str, search_word: str, use_fuzzy: bool = True) -> List[tu
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
+
+    # Do exact string search
     while start < len(text):
         idx = text.find(search_word, start)
         if idx == -1:
@@ -511,6 +527,7 @@ def find_matches(text: str, search_word: str, use_fuzzy: bool = True) -> List[tu
         matches.append((idx, len(search_word)))
         start = idx + len(search_word)
 
+    # Do fuzzy string search
     if use_fuzzy and mecab:
         start = 0
         while start < len(text):
@@ -718,7 +735,6 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
 
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format
 
-
 if __name__ == '__main__':
     search_word, target_path, use_fuzzy, recursive, output_format = parse_args()
 
@@ -747,6 +763,10 @@ if __name__ == '__main__':
 
     output_manager = OutputManager(mode=output_format)
 
+    # Monkey patch get_base_form to cache calling mecab on the user's search
+    if mecab:
+        get_base_form = memoize_search_term(get_base_form, search_word)
+
     all_results = []
 
     with ThreadPoolExecutor() as executor:
@@ -758,7 +778,8 @@ if __name__ == '__main__':
         # Collect results
         for future in futures:
             volume_results = future.result()
-            all_results.extend(volume_results)
+            if volume_results:
+                all_results.extend(volume_results)
 
     output_manager.output_results(all_results)
 
