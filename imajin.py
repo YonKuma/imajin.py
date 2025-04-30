@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 try:
     import MeCab
     mecab = MeCab.Tagger()
+    mecab.parse('')
 except (ImportError, RuntimeError) as e:
     mecab = None
     print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.", file=sys.stderr)
@@ -383,22 +384,82 @@ class Result:
 
 
 # Helper functions
+
+_BASE_FORM_INDEX: int | None = None  # Set at runtime
+_FEATURE_SEPARATOR: str = ','
+
+def detect_feature_separator_and_index() -> tuple[str, int]:
+    """
+    Detect the separator character and index for the base form feature.
+    Returns a tuple (separator, index).
+    """
+    if mecab is None:
+        return ',', 6  # Fallback
+
+    parsed = mecab.parse("食べ")
+    if parsed is None:
+        return ',', 6
+
+    for line in parsed.splitlines():
+        if line == 'EOS' or not line.strip():
+            continue
+
+        parts = line.split('\t', maxsplit=1)
+        if len(parts) != 2:
+            continue
+        surface, feature_str = parts
+
+        # Try both separators
+        for sep in [',', '\t']:
+            fields = feature_str.split(sep)
+            for i, field in enumerate(fields):
+                if field == "食べる":
+                    return sep, i
+
+    print(f"[WARNING] Unknown MeCab dictionary configuration. Fuzzy search may not function correctly", file=sys.stderr)
+    # Default fallback if detection fails
+    return ',', 6
+
+def get_base_form(line: str) -> tuple[str, str]:
+    """
+    Extract surface and base form from a MeCab line, using detected format.
+    """
+    global _BASE_FORM_INDEX, _FEATURE_SEPARATOR
+
+    parts = line.split('\t', maxsplit=1)
+    if len(parts) != 2:
+        return line, line
+
+    surface, feature_str = parts
+
+    if _BASE_FORM_INDEX is None:
+        _FEATURE_SEPARATOR, _BASE_FORM_INDEX = detect_feature_separator_and_index()
+
+    fields = feature_str.split(_FEATURE_SEPARATOR)
+    if (
+        len(fields) > _BASE_FORM_INDEX
+        and fields[_BASE_FORM_INDEX] not in ('', '*')
+    ):
+        return surface, fields[_BASE_FORM_INDEX]
+
+    return surface, surface
+
+
 def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_word and text."""
     if mecab is None:
         return -1, 0
 
     parsed_search = mecab.parse(search_word)
+
     if parsed_search is None:
         return -1, 0
 
     search_bases = []
-    for line in parsed_search.split('\n'):
-        if line == 'EOS' or line.strip() == '' or '\t' not in line:
+    for line in parsed_search.splitlines():
+        if line == 'EOS' or line.strip() == '':
             continue
-        surface, features = line.split('\t')
-        features_list = features.split(',')
-        base = features_list[6] if len(features_list) > 6 else surface
+        _, base = get_base_form(line)
         if base == '*':
             return -1, 0
         search_bases.append(base)
@@ -413,18 +474,13 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     text_tokens = []
     cursor = 0  # Real character position inside text
 
-    for line in parsed_text.split('\n'):
-        if line == 'EOS' or line.strip() == '' or '\t' not in line:
+    for line in parsed_text.splitlines():
+        if line == 'EOS' or line.strip() == '':
             continue
-        surface, features = line.split('\t')
-        features_list = features.split(',')
-        base = features_list[6] if len(features_list) > 6 else surface
-
-        # Find actual surface in text starting from current cursor
+        surface, base = get_base_form(line)
         found_pos = text.find(surface, cursor)
         if found_pos == -1:
             return -1, 0
-
         text_tokens.append((surface, base, found_pos))
         cursor = found_pos + len(surface)
 
@@ -442,6 +498,7 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
             return start_pos, end_pos - start_pos
 
     return -1, 0
+
 
 def find_matches(text: str, search_word: str, use_fuzzy: bool = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
