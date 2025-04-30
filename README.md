@@ -27,6 +27,7 @@ pip install -r requirements.txt
 
 Dependencies:
 - [beautifulsoup4](https://pypi.org/project/beautifulsoup4/)
+- [lxml](https://pypi.org/project/lxml/)
 - [mecab-python3](https://github.com/SamuraiT/mecab-python3) (optional; fuzzy matching will be disabled if MeCab is not available)
 
 ---
