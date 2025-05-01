@@ -91,7 +91,7 @@ class EpubVolume(Volume):
         self.epub_path: str = epub_path
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                self.manifest, self.spine, self.id_to_label, self.rootfile_path = parse_epub_metadata(zf)
+                self.manifest, self.spine, self.id_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
                 self.sections, self.total_text_length = self._extract_spine_documents(zf)
         except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
             raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
@@ -116,6 +116,52 @@ class EpubVolume(Volume):
             total_text_length += len(raw_text)
 
         return sections, total_text_length
+
+    def _parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
+        """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
+        try:
+            container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
+        except KeyError as e:
+            raise VolumeLoadError("Missing META-INF/container.xml in EPUB archive") from e
+
+        try:
+            rootfile_path = container.find('rootfile')['full-path']
+        except (AttributeError, TypeError, KeyError) as e:
+            raise VolumeLoadError("Malformed container.xml: could not find rootfile path") from e
+        
+        try:
+            opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
+        except KeyError as e:
+            raise VolumeLoadError(f"Missing rootfile '{rootfile_path}' in EPUB archive") from e
+
+        manifest = {item['id']: item['href'] for item in opf.find_all('item')}
+        spine = [item['idref'] for item in opf.find_all('itemref')]
+
+        id_to_label = {}
+        ncx_path = None
+        for item in opf.find_all('item'):
+            if item.get('media-type') == 'application/x-dtbncx+xml':
+                ncx_path = item['href']
+                break
+
+        if ncx_path:
+            ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
+            try:
+                ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+                for navpoint in ncx.find_all('navPoint'):
+                    src = navpoint.content['src']
+                    label = navpoint.navLabel.text.strip()
+                    if '#' in src:
+                        file_part, frag = src.split('#', 1)
+                        id_to_label[(posixpath.basename(file_part), frag)] = label
+                    else:
+                        id_to_label[(posixpath.basename(src), None)] = label
+                logging.info(f"Index ncx file found for {self.get_filename()}")
+            except (KeyError, AttributeError, TypeError):
+                logging.info(f"Index ncx not found for {self.get_filename()}")
+                pass # Silently allow a failed ncx read
+
+        return manifest, spine, id_to_label, rootfile_path
 
     def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
@@ -616,50 +662,6 @@ def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
             return tag  # Return the full tag, not the text
 
     return None
-
-def parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
-    """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
-    try:
-        container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
-    except KeyError as e:
-        raise VolumeLoadError("Missing META-INF/container.xml in EPUB archive") from e
-
-    try:
-        rootfile_path = container.find('rootfile')['full-path']
-    except (AttributeError, TypeError, KeyError) as e:
-        raise VolumeLoadError("Malformed container.xml: could not find rootfile path") from e
-    
-    try:
-        opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
-    except KeyError as e:
-        raise VolumeLoadError(f"Missing rootfile '{rootfile_path}' in EPUB archive") from e
-
-    manifest = {item['id']: item['href'] for item in opf.find_all('item')}
-    spine = [item['idref'] for item in opf.find_all('itemref')]
-
-    id_to_label = {}
-    ncx_path = None
-    for item in opf.find_all('item'):
-        if item.get('media-type') == 'application/x-dtbncx+xml':
-            ncx_path = item['href']
-            break
-
-    if ncx_path:
-        ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
-        try:
-            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-            for navpoint in ncx.find_all('navPoint'):
-                src = navpoint.content['src']
-                label = navpoint.navLabel.text.strip()
-                if '#' in src:
-                    file_part, frag = src.split('#', 1)
-                    id_to_label[(posixpath.basename(file_part), frag)] = label
-                else:
-                    id_to_label[(posixpath.basename(src), None)] = label
-        except (KeyError, AttributeError, TypeError):
-            pass # Silently allow a failed ncx read
-
-    return manifest, spine, id_to_label, rootfile_path
 
 def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> List[dict[str, str]]:
     """Search a volume and return a list of match result dictionaries."""
