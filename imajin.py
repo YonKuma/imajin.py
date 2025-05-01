@@ -21,6 +21,7 @@ A search tool for .epub and .mokuro files supporting exact and fuzzy matching.
 """
 
 import argparse
+import logging
 import zipfile
 import posixpath
 import os
@@ -34,12 +35,8 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor
 
-try:
-    import MeCab
-    mecab = MeCab.Tagger()
-except (ImportError, RuntimeError) as e:
-    mecab = None
-    print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.", file=sys.stderr)
+
+mecab = None
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
@@ -111,7 +108,7 @@ class EpubVolume(Volume):
             try:
                 content_raw = zip_file.read(full_path)
             except KeyError as e:
-                print(f"[WARNING] Missing document '{full_path}' in EPUB: {self.get_filename()}\n\tResults may be incomplete", file=sys.stderr)
+                logging.warning(f"Missing document '{full_path}' in EPUB: {self.get_filename()}\n\tResults may be incomplete")
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
@@ -414,9 +411,11 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
             fields = feature_str.split(sep)
             for i, field in enumerate(fields):
                 if field == "食べる":
+                    logging.debug(f"Identified MeCab dictionary separator: {'tab' if sep == '\t' else sep}")
+                    logging.debug(f"Identified MeCab base index: {i}")
                     return sep, i
 
-    print(f"[WARNING] Unknown MeCab dictionary configuration. Fuzzy search may not function correctly", file=sys.stderr)
+    logging.warning(f"Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
     # Default fallback if detection fails
     return ',', 6
 
@@ -446,14 +445,15 @@ def memoize_search_term(func, search_term):
     cache = {}
 
     def wrapper(word):
+        logging.debug(f"Wrapper triggered: {word}")
         if word == search_term:
             if word not in cache:
                 cache[word] = func(word)
+                logging.debug(f"Parsed search base forms: {cache[word]}")
             return cache[word]
         return func(word)
 
     return wrapper
-
 
 def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_word and text."""
@@ -666,6 +666,8 @@ def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> L
     results = []
     current_text_position = 0
 
+    logging.info(f"Searching volume {volume.get_filename()}")
+
     for section in volume.get_sections():
         matches = find_matches(section.get_text(), search_word, use_fuzzy)
 
@@ -689,7 +691,7 @@ def safe_search_volume(path, search_word, use_fuzzy):
             return None
         return search_volume(volume, search_word, use_fuzzy=use_fuzzy)
     except VolumeLoadError as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
+        logging.error(f"{e}")
         return None
 
 def parse_args() -> tuple[str, str, bool, bool, str]:
@@ -732,12 +734,45 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
         help="Output format style."
     )
 
+    options.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=0,
+        help="Increase output verbosity (e.g. -v, -vv, -vvv)"
+    )
+
     args = parser.parse_args()
 
-    return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format
+    return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
 if __name__ == '__main__':
-    search_word, target_path, use_fuzzy, recursive, output_format = parse_args()
+    search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
+
+    # Map verbosity to logging levels
+    log_level = {
+        0: logging.WARNING,   # default
+        1: logging.INFO,      # -v
+        2: logging.DEBUG,     # -vv
+    }.get(verbosity, logging.DEBUG)  # -vvv or more
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s: %(message)s"
+    )
+
+    logging.info(f"Search term: {search_word}")
+    logging.info(f"Target path: {target_path}")
+    logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
+
+    if use_fuzzy:
+        try:
+            import MeCab
+            mecab = MeCab.Tagger()
+        except (ImportError, RuntimeError) as e:
+            mecab = None
+            logging.warning("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
+        else:
+            logging.info("MeCab enabled")
 
     try:
         if os.path.isdir(target_path):
@@ -756,16 +791,17 @@ if __name__ == '__main__':
         elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
             paths = [target_path]
         else:
-            print(f"Error: '{target_path}' is not a valid file or directory.", file=sys.stderr)
+            logging.error(f"'{target_path}' is not a valid file or directory.")
             sys.exit(1)
     except (FileNotFoundError, PermissionError, OSError) as e:
-        print(f"[ERROR] Failed accessing path '{target_path}': {e}", file=sys.stderr)
+        logging.error(f"Failed accessing path '{target_path}': {e}")
         sys.exit(1)
 
     output_manager = OutputManager(mode=output_format)
 
     # Monkey patch get_base_form to cache calling mecab on the user's search
     if mecab:
+        logging.debug(f"Memoizing search term")
         get_base_form = memoize_search_term(get_base_form, search_word)
 
     all_results = []
