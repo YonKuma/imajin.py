@@ -506,6 +506,28 @@ def memoize_search_term(func, search_term):
 
     return wrapper
 
+def tokenize_with_positions(text: str) -> Optional[List[tuple[str, str, int]]]:
+    """Tokenize a text string into a tuple of (surface, base, found_pos)"""
+    parsed_text = mecab.parse(text)
+    if parsed_text is None:
+        None
+
+    text_tokens = []
+    cursor = 0  # Real character position inside text
+
+    for line in parsed_text.splitlines():
+        if line == 'EOS' or line.strip() == '':
+            continue
+        surface, base = get_base_form(line)
+        # Search for the unprocessed text in the original corpus
+        # Workaround to get an accurate text location
+        found_pos = text.find(surface, cursor)
+        if found_pos == -1:
+            return -1, 0
+        text_tokens.append((surface, base, found_pos))
+        cursor = found_pos + len(surface)
+    return text_tokens
+
 def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_word and text."""
     if mecab is None:
