@@ -89,14 +89,14 @@ class EpubVolume(Volume):
 
     def __init__(self, epub_path: str):
         self.epub_path: str = epub_path
-        try:
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                self.manifest, self.spine, self.id_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
-                self.sections, self.total_text_length = self._extract_spine_documents(zf)
-        except (zipfile.BadZipFile, FileNotFoundError, OSError, Exception) as e:
-            raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
+        # try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            self.manifest, self.spine, self.index, self.rootfile_path = self._parse_epub_metadata(zf)
+            self.sections, self.total_text_length = self._extract_spine_documents(zf)
+        # except (zipfile.BadZipFile, FileNotFoundError, OSError, Exception) as e:
+        #     raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
         self.chapters = self._locate_chapter_names()
-        logging.debug(f"Volume {self.get_filename()}: Chapters found - {', '.join(f'{k}: {v}' for k, v in self.chapters.items())}")
+        logging.debug(f"Volume {self.get_filename()}: Chapters mapped:\n{self.chapters}\n")
 
     def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[dict[str, 'EpubSection'], int]:
         sections = {}
@@ -115,6 +115,7 @@ class EpubVolume(Volume):
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
             sections[idref] = EpubSection(self, href, raw_text, content)
+            logging.debug(f"Volume {self.get_filename()}: Loaded section {href} with {len(raw_text)} characters")
             total_text_length += len(raw_text)
 
         return sections, total_text_length
@@ -124,22 +125,24 @@ class EpubVolume(Volume):
         chapters = {}
         # Check toc for chapter names
         try:
-            if self.id_to_label:
+            if self.index:
                 for id in self.spine:
-                    if id in self.sections:
-                        section = self.sections[id]
-                        if id in self.id_to_label:
-                            current_chapter = self.id_to_label[id]
+                    if section := self.sections.get(id):
+                        if id in self.index:
+                            current_chapter = self.index[id]
                         chapters[id] = current_chapter
                         section.set_chapter_name(current_chapter)
+                if chapters:
+                    logging.debug(f"Volume {self.get_filename()}: Chapters found by index")
             else:
                 for id in self.spine:
-                    if id in self.sections:
-                        section = self.sections[id]
+                    if section := self.sections.get(id):
                         if chapter_name := section.search_for_chapter_name():
                             current_chapter = chapter_name
                         chapters[id] = current_chapter
                         section.set_chapter_name(current_chapter)
+                if chapters:
+                    logging.debug(f"Volume {self.get_filename()}: Chapters found by text search")
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
         return chapters
@@ -161,40 +164,79 @@ class EpubVolume(Volume):
         except KeyError as e:
             raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
-        manifest = {item['id']: item['href'] for item in opf.find_all('item')}
+        content_path = posixpath.dirname(rootfile_path)
+        manifest = {item.get('id'): item.get('href') for item in opf.find_all('item')}
         inverse_manifest =  {v: k for k, v in manifest.items()}
-        spine = [item['idref'] for item in opf.find_all('itemref')]
+        spine = [item.get('idref') for item in opf.find_all('itemref')]
+        version = (pkg := opf.find('package')) and pkg.get('version')
+        major_version = version and int(version.split('.')[0])
+
+        logging.debug(f"Volume {self.get_filename()}: EPUB version {version}")
         logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
         logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
 
-        id_to_label = {}
+        nav_path = None
+        if nav_tag := opf.find('item', attrs={'properties': 'nav'}):
+            nav_path = nav_tag.get('href')
         ncx_path = None
-        for item in opf.find_all('item'):
-            if item.get('media-type') == 'application/x-dtbncx+xml':
-                ncx_path = item['href']
-                break
+        if ncx_tag := opf.find('item', attrs={'media-type': 'application/x-dtbncx+xml'}):
+            ncx_path = ncx_tag.get('href')
 
-        if ncx_path:
-            ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
-            try:
-                ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-                for navpoint in ncx.find_all('navPoint'):
-                    src = navpoint.content['src']
-                    label = navpoint.navLabel.text.strip()
-                    if '#' in src:
-                        file_part, frag = src.split('#', 1)
-                        id_to_label[inverse_manifest[file_part]] = label
-                    else:
-                        id_to_label[inverse_manifest[src]] = label
-                logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
-            except (KeyError, AttributeError, TypeError):
-                logging.debug(f"Volume {self.get_filename()}: No index ncx found")
-                pass # Silently allow a failed ncx read
-        else:
-            logging.debug(f"Volume {self.get_filename()}: No index ncx found")
+        index = {}
+
+        if nav_path:
+            index = self._parse_nav_index(nav_path, content_path, zip_file, inverse_manifest)
+            logging.debug(f"Volume {self.get_filename()}: Parsed nav chapters:\n{index}\n")
+
+        if not index and ncx_path:
+            index = self._parse_ncx_index(ncx_path, content_path, zip_file, inverse_manifest)
+            logging.debug(f"Volume {self.get_filename()}: Parsed ncx chapters:\n{index}\n")
+
+        return manifest, spine, index, rootfile_path
+
+    def _parse_nav_index(self, nav_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
+        index = {}
+        nav_full_path = posixpath.join(content_path, nav_path)
+        try:
+            nav = BeautifulSoup(zip_file.read(nav_full_path), 'xml')
+            toc_nav = nav.find('nav', attrs={'epub:type': 'toc'})
+            if ol := toc_nav.find('ol'):
+                for li in ol.find_all('li', recursive=False):
+                    a_tag = li.find('a', recursive=True)
+                    if a_tag and (href := a_tag.get('href')):
+                        label = a_tag.get_text(strip=True)
+                        if '#' in href:
+                            file_part, frag = href.split('#', 1)
+                            index[inverse_manifest.get(file_part)] = label
+                        else:
+                            index[inverse_manifest.get(href)] = label
+        except (KeyError, AttributeError, TypeError):
+            logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
             pass
 
-        return manifest, spine, id_to_label, rootfile_path
+        return index
+
+    def _parse_ncx_index(self, ncx_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
+        index = {}
+        ncx_full_path = posixpath.join(content_path, ncx_path)
+        try:
+            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+            for navpoint in ncx.find_all('navPoint'):
+                href = None
+                if content := navpoint.find('content'):
+                    href = content.get('src')
+                label = navpoint.navLabel.text.strip()
+                if '#' in href:
+                    file_part, frag = href.split('#', 1)
+                    index[inverse_manifest.get(file_part)] = label
+                else:
+                    index[inverse_manifest.get(href)] = label
+            logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
+        except (KeyError, AttributeError, TypeError):
+            logging.warning(f"Volume {self.get_filename()}: Index ncx file {ncx_path} missing or invalid")
+            pass
+
+        return index
 
     def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
