@@ -161,6 +161,9 @@ class EpubVolume(Volume):
             except (KeyError, AttributeError, TypeError):
                 logging.debug(f"Volume {self.get_filename()}: No index ncx found")
                 pass # Silently allow a failed ncx read
+        else:
+            logging.debug(f"Volume {self.get_filename()}: No index ncx found")
+            pass
 
         return manifest, spine, id_to_label, rootfile_path
 
@@ -445,6 +448,9 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
         return ',', 6  # Fallback
 
     parsed = mecab.parse("食べ")
+
+    logging.debug(f"MeCab 食べ parse:\n{parsed}")
+
     if parsed is None:
         return ',', 6
 
@@ -467,7 +473,6 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
                     return sep, i
 
     logging.warning(f"Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
-    logging.debug(f"MeCab 食べ parse:\n{parsed}")
     # Default fallback if detection fails
     return ',', 6
 
@@ -500,38 +505,17 @@ def memoize_search_term(func, search_term):
         if word == search_term:
             if word not in cache:
                 cache[word] = func(word)
+                logging.debug(f"Tokenized search term: {', '.join(' | '.join(map(str, t)) for t in cache[word])}")
             return cache[word]
         return func(word)
 
     return wrapper
 
-def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
-    """Fuzzy match by comparing base form tokens of search_word and text."""
-    if mecab is None:
-        return -1, 0
-
-    # Tokenize the search and fetch bases
-    parsed_search = mecab.parse(search_word)
-
-    if parsed_search is None:
-        return -1, 0
-
-    search_bases = []
-    for line in parsed_search.splitlines():
-        if line == 'EOS' or line.strip() == '':
-            continue
-        _, base = get_base_form(line)
-        if base == '*':
-            return -1, 0
-        search_bases.append(base)
-
-    if not search_bases:
-        return -1, 0
-
-    # Tokenize the corpus text to compare bases
+def tokenize_with_positions(text: str) -> Optional[List[tuple[str, str, int]]]:
+    """Tokenize a text string into a tuple of (surface, base, found_pos)"""
     parsed_text = mecab.parse(text)
     if parsed_text is None:
-        return -1, 0
+        None
 
     text_tokens = []
     cursor = 0  # Real character position inside text
@@ -547,6 +531,23 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
             return -1, 0
         text_tokens.append((surface, base, found_pos))
         cursor = found_pos + len(surface)
+    return text_tokens
+
+def fuzzy_match(text: str, search_term: str) -> tuple[int, int]:
+    """Fuzzy match by comparing base form tokens of search_term and text."""
+    if mecab is None:
+        return -1, 0
+
+    # Tokenize the search and fetch bases
+    search_bases = None
+    if search_tokens := tokenize_with_positions(search_term):
+        search_bases = [base for (_, base, _) in search_tokens]
+
+    if not search_bases:
+        return -1, 0
+
+    # Tokenize the corpus text to compare bases
+    text_tokens = tokenize_with_positions(text)
 
     if not text_tokens:
         return -1, 0
@@ -565,24 +566,24 @@ def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_word: str, use_fuzzy: bool = True) -> List[tuple[int, int]]:
+def find_matches(text: str, search_term: str, use_fuzzy: bool = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
 
     # Do exact string search
     while start < len(text):
-        idx = text.find(search_word, start)
+        idx = text.find(search_term, start)
         if idx == -1:
             break
-        matches.append((idx, len(search_word)))
-        start = idx + len(search_word)
+        matches.append((idx, len(search_term)))
+        start = idx + len(search_term)
 
     # Do fuzzy string search
     if use_fuzzy and mecab:
         start = 0
         while start < len(text):
-            fuzzy_idx, fuzzy_len = fuzzy_match(text[start:], search_word)
+            fuzzy_idx, fuzzy_len = fuzzy_match(text[start:], search_term)
             if fuzzy_idx == -1:
                 break
             absolute_idx = start + fuzzy_idx
@@ -667,7 +668,7 @@ def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
 
     return None
 
-def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> List[dict[str, str]]:
+def search_volume(volume: Volume, search_term: str, use_fuzzy: bool = True) -> List[dict[str, str]]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
@@ -675,7 +676,7 @@ def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> L
     logging.info(f"Searching volume {volume.get_filename()}")
 
     for section in volume.get_sections():
-        matches = find_matches(section.get_text(), search_word, use_fuzzy)
+        matches = find_matches(section.get_text(), search_term, use_fuzzy)
 
         for idx, match_len in matches:
             snippet = section.extract_snippet(idx, match_len)
@@ -687,7 +688,7 @@ def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> L
 
     return results
 
-def safe_search_volume(path, search_word, use_fuzzy):
+def safe_search_volume(path, search_term, use_fuzzy):
     try:
         if path.endswith('.epub'):
             volume = EpubVolume(path)
@@ -695,7 +696,7 @@ def safe_search_volume(path, search_word, use_fuzzy):
             volume = MokuroVolume(path)
         else:
             return None
-        return search_volume(volume, search_word, use_fuzzy=use_fuzzy)
+        return search_volume(volume, search_term, use_fuzzy=use_fuzzy)
     except VolumeLoadError as e:
         logging.error(f"{e}")
         return None
@@ -807,17 +808,7 @@ if __name__ == '__main__':
 
     # Monkey patch get_base_form to cache calling mecab on the user's search
     if mecab:
-        get_base_form = memoize_search_term(get_base_form, search_word)
-        parsed_search = mecab.parse(search_word)
-        logging.debug(f"MeCab parsed search term:\n{parsed_search}")
-
-        if parsed_search is not None:
-            search_bases = []
-            for line in parsed_search.splitlines():
-                if line == 'EOS' or line.strip() == '':
-                    continue
-                _, base = get_base_form(line)
-                logging.debug(f"Search base: {base}")
+        tokenize_with_positions = memoize_search_term(tokenize_with_positions, search_word)
 
     all_results = []
 
