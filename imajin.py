@@ -20,6 +20,7 @@ A search tool for .epub and .mokuro files supporting exact and fuzzy matching.
 """
 
 import argparse
+import logging
 import zipfile
 import posixpath
 import os
@@ -33,12 +34,8 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor
 
-try:
-    import MeCab
-    mecab = MeCab.Tagger()
-except (ImportError, RuntimeError) as e:
-    mecab = None
-    print("[WARNING] MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.", file=sys.stderr)
+
+mecab = None
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
@@ -93,7 +90,7 @@ class EpubVolume(Volume):
         self.epub_path: str = epub_path
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                self.manifest, self.spine, self.id_to_label, self.rootfile_path = parse_epub_metadata(zf)
+                self.manifest, self.spine, self.id_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
                 self.sections, self.total_text_length = self._extract_spine_documents(zf)
         except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
             raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
@@ -110,7 +107,7 @@ class EpubVolume(Volume):
             try:
                 content_raw = zip_file.read(full_path)
             except KeyError as e:
-                print(f"[WARNING] Missing document '{full_path}' in EPUB: {self.get_filename()}\n\tResults may be incomplete", file=sys.stderr)
+                logging.warning(f"Volume {self.get_filename()}: Missing document '{full_path}'\n\tResults may be incomplete")
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
@@ -118,6 +115,54 @@ class EpubVolume(Volume):
             total_text_length += len(raw_text)
 
         return sections, total_text_length
+
+    def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
+        """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
+        try:
+            container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
+        except KeyError as e:
+            raise VolumeLoadError(f"Volume {self.get_filename()}:Missing META-INF/container.xml in EPUB archive") from e
+
+        try:
+            rootfile_path = container.find('rootfile')['full-path']
+        except (AttributeError, TypeError, KeyError) as e:
+            raise VolumeLoadError(f"Volume {self.get_filename()}: Malformed container.xml: could not find rootfile path") from e
+        
+        try:
+            opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
+        except KeyError as e:
+            raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
+
+        manifest = {item['id']: item['href'] for item in opf.find_all('item')}
+        spine = [item['idref'] for item in opf.find_all('itemref')]
+        logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
+        logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
+
+        id_to_label = {}
+        ncx_path = None
+        for item in opf.find_all('item'):
+            if item.get('media-type') == 'application/x-dtbncx+xml':
+                ncx_path = item['href']
+                break
+
+        if ncx_path:
+            ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
+            try:
+                ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+                for navpoint in ncx.find_all('navPoint'):
+                    src = navpoint.content['src']
+                    label = navpoint.navLabel.text.strip()
+                    if '#' in src:
+                        file_part, frag = src.split('#', 1)
+                        id_to_label[(posixpath.basename(file_part), frag)] = label
+                    else:
+                        id_to_label[(posixpath.basename(src), None)] = label
+                logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
+            except (KeyError, AttributeError, TypeError):
+                logging.debug(f"Volume {self.get_filename()}: No index ncx found")
+                pass # Silently allow a failed ncx read
+
+        return manifest, spine, id_to_label, rootfile_path
 
     def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
@@ -172,6 +217,7 @@ class EpubSection(Section):
         href_base = posixpath.basename(self.href).split('#')[0]
         if (href_base, None) in id_to_label:
             self._cached_chapter_name = id_to_label[(href_base, None)]
+            logging.debug(f"Volume {self.volume.get_filename()}: {href_base} toc identification - {self._cached_chapter_name}");
             return self._cached_chapter_name
 
         # 2. Check whether the first text in the file looks like a chapter name
@@ -180,15 +226,18 @@ class EpubSection(Section):
             if self.looks_like_chapter_name(first_text_tag, body):
                 first_text = ' '.join(first_text_tag.stripped_strings).strip()
                 self._cached_chapter_name = first_text
+                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} text identification - {self._cached_chapter_name}");
                 return self._cached_chapter_name
 
         # 3. Check if the previous section has a name, in case files split between chapters
         if previous_chapter := self.get_previous_chapter():
             if chapter_name := previous_chapter.find_chapter_name():
                 self._cached_chapter_name = chapter_name
+                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} prev identification - {self._cached_chapter_name}");
                 return self._cached_chapter_name
 
         self._cached_chapter_name = 'Unknown'
+        logging.debug(f"Volume {self.volume.get_filename()}: {href_base} unknown - {self._cached_chapter_name}");
         return 'Unknown'
 
     @staticmethod
@@ -413,9 +462,12 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
             fields = feature_str.split(sep)
             for i, field in enumerate(fields):
                 if field == "食べる":
+                    logging.debug(f"Identified MeCab dictionary separator: {'tab' if sep == '\t' else sep}")
+                    logging.debug(f"Identified MeCab base index: {i}")
                     return sep, i
 
-    print(f"[WARNING] Unknown MeCab dictionary configuration. Fuzzy search may not function correctly", file=sys.stderr)
+    logging.warning(f"Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
+    logging.debug(f"MeCab 食べ parse:\n{parsed}")
     # Default fallback if detection fails
     return ',', 6
 
@@ -452,7 +504,6 @@ def memoize_search_term(func, search_term):
         return func(word)
 
     return wrapper
-
 
 def fuzzy_match(text: str, search_word: str) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_word and text."""
@@ -616,54 +667,12 @@ def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
 
     return None
 
-def parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
-    """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
-    try:
-        container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
-    except KeyError as e:
-        raise VolumeLoadError("Missing META-INF/container.xml in EPUB archive") from e
-
-    try:
-        rootfile_path = container.find('rootfile')['full-path']
-    except (AttributeError, TypeError, KeyError) as e:
-        raise VolumeLoadError("Malformed container.xml: could not find rootfile path") from e
-    
-    try:
-        opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
-    except KeyError as e:
-        raise VolumeLoadError(f"Missing rootfile '{rootfile_path}' in EPUB archive") from e
-
-    manifest = {item['id']: item['href'] for item in opf.find_all('item')}
-    spine = [item['idref'] for item in opf.find_all('itemref')]
-
-    id_to_label = {}
-    ncx_path = None
-    for item in opf.find_all('item'):
-        if item.get('media-type') == 'application/x-dtbncx+xml':
-            ncx_path = item['href']
-            break
-
-    if ncx_path:
-        ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
-        try:
-            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-            for navpoint in ncx.find_all('navPoint'):
-                src = navpoint.content['src']
-                label = navpoint.navLabel.text.strip()
-                if '#' in src:
-                    file_part, frag = src.split('#', 1)
-                    id_to_label[(posixpath.basename(file_part), frag)] = label
-                else:
-                    id_to_label[(posixpath.basename(src), None)] = label
-        except (KeyError, AttributeError, TypeError):
-            pass # Silently allow a failed ncx read
-
-    return manifest, spine, id_to_label, rootfile_path
-
 def search_volume(volume: Volume, search_word: str, use_fuzzy: bool = True) -> List[dict[str, str]]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
+
+    logging.info(f"Searching volume {volume.get_filename()}")
 
     for section in volume.get_sections():
         matches = find_matches(section.get_text(), search_word, use_fuzzy)
@@ -688,7 +697,7 @@ def safe_search_volume(path, search_word, use_fuzzy):
             return None
         return search_volume(volume, search_word, use_fuzzy=use_fuzzy)
     except VolumeLoadError as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
+        logging.error(f"{e}")
         return None
 
 def parse_args() -> tuple[str, str, bool, bool, str]:
@@ -731,12 +740,45 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
         help="Output format style."
     )
 
+    options.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=0,
+        help="Increase output verbosity (e.g. -v, -vv, -vvv)"
+    )
+
     args = parser.parse_args()
 
-    return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format
+    return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
 if __name__ == '__main__':
-    search_word, target_path, use_fuzzy, recursive, output_format = parse_args()
+    search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
+
+    # Map verbosity to logging levels
+    log_level = {
+        0: logging.WARNING,   # default
+        1: logging.INFO,      # -v
+        2: logging.DEBUG,     # -vv
+    }.get(verbosity, logging.DEBUG)  # -vvv or more
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s: %(message)s"
+    )
+
+    logging.info(f"Search term: {search_word}")
+    logging.info(f"Target path: {target_path}")
+    logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
+
+    if use_fuzzy:
+        try:
+            import MeCab
+            mecab = MeCab.Tagger()
+        except (ImportError, RuntimeError) as e:
+            mecab = None
+            logging.warning("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
+        else:
+            logging.info("MeCab enabled")
 
     try:
         if os.path.isdir(target_path):
@@ -755,10 +797,10 @@ if __name__ == '__main__':
         elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
             paths = [target_path]
         else:
-            print(f"Error: '{target_path}' is not a valid file or directory.", file=sys.stderr)
+            logging.error(f"'{target_path}' is not a valid file or directory.")
             sys.exit(1)
     except (FileNotFoundError, PermissionError, OSError) as e:
-        print(f"[ERROR] Failed accessing path '{target_path}': {e}", file=sys.stderr)
+        logging.error(f"Failed accessing path '{target_path}': {e}")
         sys.exit(1)
 
     output_manager = OutputManager(mode=output_format)
@@ -766,6 +808,16 @@ if __name__ == '__main__':
     # Monkey patch get_base_form to cache calling mecab on the user's search
     if mecab:
         get_base_form = memoize_search_term(get_base_form, search_word)
+        parsed_search = mecab.parse(search_word)
+        logging.debug(f"MeCab parsed search term:\n{parsed_search}")
+
+        if parsed_search is not None:
+            search_bases = []
+            for line in parsed_search.splitlines():
+                if line == 'EOS' or line.strip() == '':
+                    continue
+                _, base = get_base_form(line)
+                logging.debug(f"Search base: {base}")
 
     all_results = []
 
