@@ -49,7 +49,7 @@ python imajin.py [options] <search_word> <file_or_directory>
 |:-------|:------------|
 | `--no-fuzzy` | Disable fuzzy matching (only exact matches). |
 | `-r`, `--recursive` | Recursively search subdirectories if a directory is specified. |
-| `--format {text,markdown,json}` | Choose output format (default: `text`). |
+| `--format {text,markdown,md,json}` | Choose output format (default: `text`). |
 | `-h`, `--help` | Show help message and exit. |
 
 ---
