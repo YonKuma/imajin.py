@@ -376,6 +376,30 @@ class OutputManager:
     def __init__(self, mode: str = 'text'):
         self.mode = mode
 
+    def output_global_header(self):
+        if self.mode == 'json':
+            print("[")
+
+    def output_volume_results(self, results: List['Result'], first: bool = False):
+        """Output all results for a single volume"""
+        if self.mode == 'json':
+            if not first:
+                print(",")
+            for result in results:
+                self._print_indented(json.dumps(result.to_dict(mode=self.mode), ensure_ascii=False, indent=2))
+        else:
+            self._output_text_or_markdown(results)
+
+    def output_global_footer(self):
+        if self.mode == 'json':
+            print("\n]")
+
+    def _print_indented(self, text):
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            end = '\n' if i < len(lines) - 1 else ''
+            print('  ' + line, end=end)
+
     def output_results(self, results: List['Result']) -> None:
         """Output the given results immediately."""
         if self.mode == 'json':
@@ -856,12 +880,12 @@ if __name__ == '__main__':
             if path.endswith('.epub') or path.endswith('.mokuro'):
                 futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
 
+        output_manager.output_global_header()
+        first = True
         # Collect results
         for future in futures:
             volume_results = future.result()
             if volume_results:
-                all_results.extend(volume_results)
-
-    output_manager.output_results(all_results)
-
-
+                output_manager.output_volume_results(volume_results, first=first)
+                first = False
+        output_manager.output_global_footer()
