@@ -90,13 +90,15 @@ class EpubVolume(Volume):
         self.epub_path: str = epub_path
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                self.manifest, self.spine, self.id_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
+                self.manifest, self.spine, self.id_to_label, self.idref_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
                 self.sections, self.total_text_length = self._extract_spine_documents(zf)
-        except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
+        except (zipfile.BadZipFile, FileNotFoundError, OSError, Exception) as e:
             raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
+        self.chapters = self._locate_chapter_names()
+        logging.debug(f"Volume {self.get_filename()}: Chapters found - {', '.join(f'{k}: {v}' for k, v in self.chapters.items())}")
 
-    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[List['EpubSection'], int]:
-        sections = []
+    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[dict[str, 'EpubSection'], int]:
+        sections = {}
         total_text_length = 0
 
         for idref in self.spine:
@@ -111,10 +113,35 @@ class EpubVolume(Volume):
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
-            sections.append(EpubSection(self, href, raw_text, content))
+            sections[idref] = EpubSection(self, href, raw_text, content)
             total_text_length += len(raw_text)
 
         return sections, total_text_length
+
+    def _locate_chapter_names(self) -> dict[str, str]:
+        current_chapter = "Front Matter"
+        chapters = {}
+        # Check toc for chapter names
+        try:
+            if self.idref_to_label:
+                for id in self.spine:
+                    if id in self.sections:
+                        section = self.sections[id]
+                        if id in self.idref_to_label:
+                            current_chapter = self.idref_to_label[id]
+                        chapters[id] = current_chapter
+                        section.set_chapter_name(current_chapter)
+            else:
+                for id in self.spine:
+                    if id in self.sections:
+                        section = self.sections[id]
+                        if chapter_name := section.search_for_chapter_name():
+                            current_chapter = chapter_name
+                        chapters[id] = current_chapter
+                        section.set_chapter_name(current_chapter)
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return chapters
 
     def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
         """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
@@ -134,11 +161,13 @@ class EpubVolume(Volume):
             raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
         manifest = {item['id']: item['href'] for item in opf.find_all('item')}
+        inverse_manifest =  {v: k for k, v in manifest.items()}
         spine = [item['idref'] for item in opf.find_all('itemref')]
         logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
         logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
 
         id_to_label = {}
+        idref_to_label = {}
         ncx_path = None
         for item in opf.find_all('item'):
             if item.get('media-type') == 'application/x-dtbncx+xml':
@@ -155,8 +184,10 @@ class EpubVolume(Volume):
                     if '#' in src:
                         file_part, frag = src.split('#', 1)
                         id_to_label[(posixpath.basename(file_part), frag)] = label
+                        idref_to_label[inverse_manifest[file_part]] = label
                     else:
                         id_to_label[(posixpath.basename(src), None)] = label
+                        idref_to_label[inverse_manifest[src]] = label
                 logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
             except (KeyError, AttributeError, TypeError):
                 logging.debug(f"Volume {self.get_filename()}: No index ncx found")
@@ -165,11 +196,11 @@ class EpubVolume(Volume):
             logging.debug(f"Volume {self.get_filename()}: No index ncx found")
             pass
 
-        return manifest, spine, id_to_label, rootfile_path
+        return manifest, spine, id_to_label, idref_to_label, rootfile_path
 
     def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
-        return self.sections
+        return list(self.sections.values())
 
     def get_total_length(self) -> int:
         """Return total text length of the volume."""
@@ -182,9 +213,9 @@ class EpubVolume(Volume):
     def get_previous_chapter(self, chapter: 'EpubSection') -> Optional['EpubSection']:
         """Given a chapter, return the previous chapter in spine order, or None if first."""
         try:
-            idx = self.sections.index(chapter)
+            idx = list(self.sections.values()).index(chapter)
             if idx > 0:
-                return self.sections[idx - 1]
+                return list(self.sections.values())[idx - 1]
             else:
                 return None
         except ValueError:
@@ -207,6 +238,15 @@ class EpubSection(Section):
     def get_previous_chapter(self) -> Optional['EpubSection']:
         """Return the previous chapter in the volume, if any."""
         return self.volume.get_previous_chapter(self)
+
+    def search_for_chapter_name(self) -> Optional[str]:
+        """Search this section for something that looks like a chapter name"""
+        body = self.content.find('body')
+        if body and (first_text_tag := get_first_innermost_block(body)):
+            if self.looks_like_chapter_name(first_text_tag, body):
+                first_text = ' '.join(first_text_tag.stripped_strings).strip()
+                return first_text
+        return None
 
     def find_chapter_name(self) -> str:
         if self._cached_chapter_name is not None:
@@ -277,8 +317,14 @@ class EpubSection(Section):
     def get_display_type(self) -> str:
         return "Chapter"
 
+    def set_chapter_name(self, str):
+        self._cached_chapter_name = str
+
     def get_display_name(self) -> str:
-        return self.find_chapter_name()
+        if self._cached_chapter_name is not None:
+            return self._cached_chapter_name
+        else:
+            return "Unknown"
 
 class MokuroVolume(Volume):
     """Volume class for handling Mokuro (manga JSON) files."""
