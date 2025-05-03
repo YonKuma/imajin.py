@@ -771,7 +771,7 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
 
     options.add_argument(
         "--format",
-        choices=["text", "markdown", "json"],
+        choices=["text", "markdown", "md", "json"],
         default="text",
         help="Output format style."
     )
@@ -784,6 +784,9 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
     )
 
     args = parser.parse_args()
+
+    if args.format == "md":
+        args.format = "markdown"
 
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
