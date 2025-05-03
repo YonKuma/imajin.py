@@ -108,7 +108,7 @@ class EpubVolume(Volume):
             try:
                 content_raw = zip_file.read(full_path)
             except KeyError as e:
-                logging.warning(f"Missing document '{full_path}' in EPUB: {self.get_filename()}\n\tResults may be incomplete")
+                logging.warning(f"Volume {self.get_filename()}: Missing document '{full_path}'\n\tResults may be incomplete")
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
@@ -117,25 +117,27 @@ class EpubVolume(Volume):
 
         return sections, total_text_length
 
-    def _parse_epub_metadata(zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
+    def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
         """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
         try:
             container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
         except KeyError as e:
-            raise VolumeLoadError("Missing META-INF/container.xml in EPUB archive") from e
+            raise VolumeLoadError(f"Volume {self.get_filename()}:Missing META-INF/container.xml in EPUB archive") from e
 
         try:
             rootfile_path = container.find('rootfile')['full-path']
         except (AttributeError, TypeError, KeyError) as e:
-            raise VolumeLoadError("Malformed container.xml: could not find rootfile path") from e
+            raise VolumeLoadError(f"Volume {self.get_filename()}: Malformed container.xml: could not find rootfile path") from e
         
         try:
             opf = BeautifulSoup(zip_file.read(rootfile_path), 'xml')
         except KeyError as e:
-            raise VolumeLoadError(f"Missing rootfile '{rootfile_path}' in EPUB archive") from e
+            raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
         manifest = {item['id']: item['href'] for item in opf.find_all('item')}
         spine = [item['idref'] for item in opf.find_all('itemref')]
+        logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
+        logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
 
         id_to_label = {}
         ncx_path = None
@@ -156,9 +158,9 @@ class EpubVolume(Volume):
                         id_to_label[(posixpath.basename(file_part), frag)] = label
                     else:
                         id_to_label[(posixpath.basename(src), None)] = label
-                logging.info(f"Index ncx file found for {self.get_filename()}")
+                logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
             except (KeyError, AttributeError, TypeError):
-                logging.info(f"Index ncx not found for {self.get_filename()}")
+                logging.debug(f"Volume {self.get_filename()}: No index ncx found")
                 pass # Silently allow a failed ncx read
 
         return manifest, spine, id_to_label, rootfile_path
@@ -216,6 +218,7 @@ class EpubSection(Section):
         href_base = posixpath.basename(self.href).split('#')[0]
         if (href_base, None) in id_to_label:
             self._cached_chapter_name = id_to_label[(href_base, None)]
+            logging.debug(f"Volume {self.volume.get_filename()}: {href_base} toc identification - {self._cached_chapter_name}");
             return self._cached_chapter_name
 
         # 2. Check whether the first text in the file looks like a chapter name
@@ -224,15 +227,18 @@ class EpubSection(Section):
             if self.looks_like_chapter_name(first_text_tag, body):
                 first_text = ' '.join(first_text_tag.stripped_strings).strip()
                 self._cached_chapter_name = first_text
+                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} text identification - {self._cached_chapter_name}");
                 return self._cached_chapter_name
 
         # 3. Check if the previous section has a name, in case files split between chapters
         if previous_chapter := self.get_previous_chapter():
             if chapter_name := previous_chapter.find_chapter_name():
                 self._cached_chapter_name = chapter_name
+                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} prev identification - {self._cached_chapter_name}");
                 return self._cached_chapter_name
 
         self._cached_chapter_name = 'Unknown'
+        logging.debug(f"Volume {self.volume.get_filename()}: {href_base} unknown - {self._cached_chapter_name}");
         return 'Unknown'
 
     @staticmethod
@@ -462,6 +468,7 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
                     return sep, i
 
     logging.warning(f"Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
+    logging.debug(f"MeCab 食べ parse:\n{parsed}")
     # Default fallback if detection fails
     return ',', 6
 
@@ -491,11 +498,9 @@ def memoize_search_term(func, search_term):
     cache = {}
 
     def wrapper(word):
-        logging.debug(f"Wrapper triggered: {word}")
         if word == search_term:
             if word not in cache:
                 cache[word] = func(word)
-                logging.debug(f"Parsed search base forms: {cache[word]}")
             return cache[word]
         return func(word)
 
@@ -803,8 +808,17 @@ if __name__ == '__main__':
 
     # Monkey patch get_base_form to cache calling mecab on the user's search
     if mecab:
-        logging.debug(f"Memoizing search term")
         get_base_form = memoize_search_term(get_base_form, search_word)
+        parsed_search = mecab.parse(search_word)
+        logging.debug(f"MeCab parsed search term:\n{parsed_search}")
+
+        if parsed_search is not None:
+            search_bases = []
+            for line in parsed_search.splitlines():
+                if line == 'EOS' or line.strip() == '':
+                    continue
+                _, base = get_base_form(line)
+                logging.debug(f"Search base: {base}")
 
     all_results = []
 
