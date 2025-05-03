@@ -88,15 +88,17 @@ class EpubVolume(Volume):
 
     def __init__(self, epub_path: str):
         self.epub_path: str = epub_path
-        try:
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                self.manifest, self.spine, self.id_to_label, self.rootfile_path = self._parse_epub_metadata(zf)
-                self.sections, self.total_text_length = self._extract_spine_documents(zf)
-        except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
-            raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
+        # try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            self.manifest, self.spine, self.index, self.rootfile_path = self._parse_epub_metadata(zf)
+            self.sections, self.total_text_length = self._extract_spine_documents(zf)
+        # except (zipfile.BadZipFile, FileNotFoundError, OSError, Exception) as e:
+        #     raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
+        self.chapters = self._locate_chapter_names()
+        logging.debug(f"Volume {self.get_filename()}: Chapters mapped:\n{self.chapters}\n")
 
-    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[List['EpubSection'], int]:
-        sections = []
+    def _extract_spine_documents(self, zip_file: zipfile.ZipFile) -> tuple[dict[str, 'EpubSection'], int]:
+        sections = {}
         total_text_length = 0
 
         for idref in self.spine:
@@ -111,10 +113,38 @@ class EpubVolume(Volume):
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
             raw_text = content.get_text()
-            sections.append(EpubSection(self, href, raw_text, content))
+            sections[idref] = EpubSection(self, href, raw_text, content)
+            logging.debug(f"Volume {self.get_filename()}: Loaded section {href} with {len(raw_text)} characters")
             total_text_length += len(raw_text)
 
         return sections, total_text_length
+
+    def _locate_chapter_names(self) -> dict[str, str]:
+        current_chapter = "Front Matter"
+        chapters = {}
+        # Check toc for chapter names
+        try:
+            if self.index:
+                for id in self.spine:
+                    if section := self.sections.get(id):
+                        if id in self.index:
+                            current_chapter = self.index[id]
+                        chapters[id] = current_chapter
+                        section.set_chapter_name(current_chapter)
+                if chapters:
+                    logging.debug(f"Volume {self.get_filename()}: Chapters found by index")
+            else:
+                for id in self.spine:
+                    if section := self.sections.get(id):
+                        if chapter_name := section.search_for_chapter_name():
+                            current_chapter = chapter_name
+                        chapters[id] = current_chapter
+                        section.set_chapter_name(current_chapter)
+                if chapters:
+                    logging.debug(f"Volume {self.get_filename()}: Chapters found by text search")
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return chapters
 
     def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
         """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
@@ -133,43 +163,83 @@ class EpubVolume(Volume):
         except KeyError as e:
             raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
-        manifest = {item['id']: item['href'] for item in opf.find_all('item')}
-        spine = [item['idref'] for item in opf.find_all('itemref')]
+        content_path = posixpath.dirname(rootfile_path)
+        manifest = {item.get('id'): item.get('href') for item in opf.find_all('item')}
+        inverse_manifest =  {v: k for k, v in manifest.items()}
+        spine = [item.get('idref') for item in opf.find_all('itemref')]
+        version = (pkg := opf.find('package')) and pkg.get('version')
+        major_version = version and int(version.split('.')[0])
+
+        logging.debug(f"Volume {self.get_filename()}: EPUB version {version}")
         logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
         logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
 
-        id_to_label = {}
+        nav_path = None
+        if nav_tag := opf.find('item', attrs={'properties': 'nav'}):
+            nav_path = nav_tag.get('href')
         ncx_path = None
-        for item in opf.find_all('item'):
-            if item.get('media-type') == 'application/x-dtbncx+xml':
-                ncx_path = item['href']
-                break
+        if ncx_tag := opf.find('item', attrs={'media-type': 'application/x-dtbncx+xml'}):
+            ncx_path = ncx_tag.get('href')
 
-        if ncx_path:
-            ncx_full_path = posixpath.join(posixpath.dirname(rootfile_path), ncx_path)
-            try:
-                ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-                for navpoint in ncx.find_all('navPoint'):
-                    src = navpoint.content['src']
-                    label = navpoint.navLabel.text.strip()
-                    if '#' in src:
-                        file_part, frag = src.split('#', 1)
-                        id_to_label[(posixpath.basename(file_part), frag)] = label
-                    else:
-                        id_to_label[(posixpath.basename(src), None)] = label
-                logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
-            except (KeyError, AttributeError, TypeError):
-                logging.debug(f"Volume {self.get_filename()}: No index ncx found")
-                pass # Silently allow a failed ncx read
-        else:
-            logging.debug(f"Volume {self.get_filename()}: No index ncx found")
+        index = {}
+
+        if nav_path:
+            index = self._parse_nav_index(nav_path, content_path, zip_file, inverse_manifest)
+            logging.debug(f"Volume {self.get_filename()}: Parsed nav chapters:\n{index}\n")
+
+        if not index and ncx_path:
+            index = self._parse_ncx_index(ncx_path, content_path, zip_file, inverse_manifest)
+            logging.debug(f"Volume {self.get_filename()}: Parsed ncx chapters:\n{index}\n")
+
+        return manifest, spine, index, rootfile_path
+
+    def _parse_nav_index(self, nav_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
+        index = {}
+        nav_full_path = posixpath.join(content_path, nav_path)
+        try:
+            nav = BeautifulSoup(zip_file.read(nav_full_path), 'xml')
+            toc_nav = nav.find('nav', attrs={'epub:type': 'toc'})
+            if ol := toc_nav.find('ol'):
+                for li in ol.find_all('li', recursive=False):
+                    a_tag = li.find('a', recursive=True)
+                    if a_tag and (href := a_tag.get('href')):
+                        label = a_tag.get_text(strip=True)
+                        if '#' in href:
+                            file_part, frag = href.split('#', 1)
+                            index[inverse_manifest.get(file_part)] = label
+                        else:
+                            index[inverse_manifest.get(href)] = label
+        except (KeyError, AttributeError, TypeError):
+            logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
             pass
 
-        return manifest, spine, id_to_label, rootfile_path
+        return index
+
+    def _parse_ncx_index(self, ncx_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
+        index = {}
+        ncx_full_path = posixpath.join(content_path, ncx_path)
+        try:
+            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+            for navpoint in ncx.find_all('navPoint'):
+                href = None
+                if content := navpoint.find('content'):
+                    href = content.get('src')
+                label = navpoint.navLabel.text.strip()
+                if '#' in href:
+                    file_part, frag = href.split('#', 1)
+                    index[inverse_manifest.get(file_part)] = label
+                else:
+                    index[inverse_manifest.get(href)] = label
+            logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
+        except (KeyError, AttributeError, TypeError):
+            logging.warning(f"Volume {self.get_filename()}: Index ncx file {ncx_path} missing or invalid")
+            pass
+
+        return index
 
     def get_sections(self) -> List['EpubSection']:
         """Return all sections in the volume."""
-        return self.sections
+        return list(self.sections.values())
 
     def get_total_length(self) -> int:
         """Return total text length of the volume."""
@@ -178,17 +248,6 @@ class EpubVolume(Volume):
     def get_filename(self) -> str:
         """Return the base filename of the volume."""
         return os.path.basename(self.epub_path)
-
-    def get_previous_chapter(self, chapter: 'EpubSection') -> Optional['EpubSection']:
-        """Given a chapter, return the previous chapter in spine order, or None if first."""
-        try:
-            idx = self.sections.index(chapter)
-            if idx > 0:
-                return self.sections[idx - 1]
-            else:
-                return None
-        except ValueError:
-            return None
 
 class EpubSection(Section):
     """Section class representing a chapter inside an EPUB volume."""
@@ -204,44 +263,14 @@ class EpubSection(Section):
         """Return the raw text of the section."""
         return self.raw_text
 
-    def get_previous_chapter(self) -> Optional['EpubSection']:
-        """Return the previous chapter in the volume, if any."""
-        return self.volume.get_previous_chapter(self)
-
-    def find_chapter_name(self) -> str:
-        if self._cached_chapter_name is not None:
-            return self._cached_chapter_name
-
-        id_to_label = getattr(self.volume, 'id_to_label', {})
-        spine_docs = self.volume.get_sections()
-        idx_in_spine = spine_docs.index(self)
-
-        # 1. Check whether the toc.ncx had a chapter for the file
-        href_base = posixpath.basename(self.href).split('#')[0]
-        if (href_base, None) in id_to_label:
-            self._cached_chapter_name = id_to_label[(href_base, None)]
-            logging.debug(f"Volume {self.volume.get_filename()}: {href_base} toc identification - {self._cached_chapter_name}");
-            return self._cached_chapter_name
-
-        # 2. Check whether the first text in the file looks like a chapter name
+    def search_for_chapter_name(self) -> Optional[str]:
+        """Search this section for something that looks like a chapter name"""
         body = self.content.find('body')
         if body and (first_text_tag := get_first_innermost_block(body)):
             if self.looks_like_chapter_name(first_text_tag, body):
                 first_text = ' '.join(first_text_tag.stripped_strings).strip()
-                self._cached_chapter_name = first_text
-                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} text identification - {self._cached_chapter_name}");
-                return self._cached_chapter_name
-
-        # 3. Check if the previous section has a name, in case files split between chapters
-        if previous_chapter := self.get_previous_chapter():
-            if chapter_name := previous_chapter.find_chapter_name():
-                self._cached_chapter_name = chapter_name
-                logging.debug(f"Volume {self.volume.get_filename()}: {href_base} prev identification - {self._cached_chapter_name}");
-                return self._cached_chapter_name
-
-        self._cached_chapter_name = 'Unknown'
-        logging.debug(f"Volume {self.volume.get_filename()}: {href_base} unknown - {self._cached_chapter_name}");
-        return 'Unknown'
+                return first_text
+        return None
 
     @staticmethod
     def looks_like_chapter_name(tag: BeautifulSoup, body: BeautifulSoup) -> bool:
@@ -277,8 +306,14 @@ class EpubSection(Section):
     def get_display_type(self) -> str:
         return "Chapter"
 
+    def set_chapter_name(self, str):
+        self._cached_chapter_name = str
+
     def get_display_name(self) -> str:
-        return self.find_chapter_name()
+        if self._cached_chapter_name is not None:
+            return self._cached_chapter_name
+        else:
+            return "Unknown"
 
 class MokuroVolume(Volume):
     """Volume class for handling Mokuro (manga JSON) files."""
