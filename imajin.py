@@ -400,14 +400,6 @@ class OutputManager:
             end = '\n' if i < len(lines) - 1 else ''
             print('  ' + line, end=end)
 
-    def output_results(self, results: List['Result']) -> None:
-        """Output the given results immediately."""
-        if self.mode == 'json':
-            output = [result.to_dict(mode=self.mode) for result in results]
-            print(json.dumps(output, ensure_ascii=False, indent=2))
-        else:
-            self._output_text_or_markdown(results)
-
     def _output_text_or_markdown(self, results: List['Result']) -> None:
         grouped = self._group_results_by_volume(results)
 
