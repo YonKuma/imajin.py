@@ -27,7 +27,6 @@ import os
 import re
 import sys
 import json
-import signal
 from collections import defaultdict
 from functools import lru_cache
 from typing import List, Optional, Any
@@ -35,6 +34,7 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+__version__ = "1.2.0"
 
 mecab = None
 
@@ -808,90 +808,87 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
 def main():
-    global tokenize_with_positions, mecab
-
-    search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
-
-    # Map verbosity to logging levels
-    log_level = {
-        0: logging.WARNING,   # default
-        1: logging.INFO,      # -v
-        2: logging.DEBUG,     # -vv
-    }.get(verbosity, logging.DEBUG)  # -vvv or more
-
-    logging.basicConfig(
-        level=log_level,
-        format="%(levelname)s: %(message)s"
-    )
-
-    logging.info(f"Search term: {search_word}")
-    logging.info(f"Target path: {target_path}")
-    logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
-
-    if use_fuzzy:
-        try:
-            import MeCab
-            mecab = MeCab.Tagger()
-        except (ImportError, RuntimeError) as e:
-            mecab = None
-            logging.warning("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
-        else:
-            logging.info("MeCab enabled")
-
     try:
-        if os.path.isdir(target_path):
-            if recursive:
-                paths = []
-                for root, dirs, files in os.walk(target_path):
-                    for f in files:
-                        if f.endswith(('.epub', '.mokuro')):
-                            paths.append(os.path.join(root, f))
+        global tokenize_with_positions, mecab
+
+        search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
+
+        # Map verbosity to logging levels
+        log_level = {
+            0: logging.WARNING,   # default
+            1: logging.INFO,      # -v
+            2: logging.DEBUG,     # -vv
+        }.get(verbosity, logging.DEBUG)  # -vvv or more
+
+        logging.basicConfig(
+            level=log_level,
+            format="%(levelname)s: %(message)s"
+        )
+
+        logging.info(f"Search term: {search_word}")
+        logging.info(f"Target path: {target_path}")
+        logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
+
+        if use_fuzzy:
+            try:
+                import MeCab
+                mecab = MeCab.Tagger()
+            except (ImportError, RuntimeError) as e:
+                mecab = None
+                logging.info("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
             else:
-                paths = [
-                    os.path.join(target_path, f)
-                    for f in os.listdir(target_path)
-                    if f.endswith(('.epub', '.mokuro'))
-                ]
-        elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
-            paths = [target_path]
-        else:
-            logging.error(f"'{target_path}' is not a valid file or directory.")
-            sys.exit(1)
-    except (FileNotFoundError, PermissionError, OSError) as e:
-        logging.error(f"Failed accessing path '{target_path}': {e}")
-        sys.exit(1)
+                logging.info("MeCab enabled")
 
-    output_manager = OutputManager(mode=output_format)
-
-    # Monkey patch get_base_form to cache calling mecab on the user's search
-    if mecab:
-        tokenize_with_positions = memoize_search_term(tokenize_with_positions, search_word)
-
-    all_results = []
-
-    with ThreadPoolExecutor() as executor:
         try:
-            futures = []
-            for path in paths:
-                if path.endswith('.epub') or path.endswith('.mokuro'):
-                    futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
+            if os.path.isdir(target_path):
+                if recursive:
+                    paths = []
+                    for root, dirs, files in os.walk(target_path):
+                        for f in files:
+                            if f.endswith(('.epub', '.mokuro')):
+                                paths.append(os.path.join(root, f))
+                else:
+                    paths = [
+                        os.path.join(target_path, f)
+                        for f in os.listdir(target_path)
+                        if f.endswith(('.epub', '.mokuro'))
+                    ]
+            elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
+                paths = [target_path]
+            else:
+                logging.error(f"'{target_path}' is not a valid file or directory.")
+                sys.exit(1)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            logging.error(f"Failed accessing path '{target_path}': {e}")
+            sys.exit(1)
 
-            output_manager.output_global_header()
-            first = True
-            # Collect results
-            for future in as_completed(futures):
-                volume_results = future.result()
-                if volume_results:
-                    output_manager.output_volume_results(volume_results, first=first)
-                    first = False
-            output_manager.output_global_footer()
-        except KeyboardInterrupt:
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
+        output_manager = OutputManager(mode=output_format)
 
-if __name__ == '__main__':
-    try:
-        main()
+        # Monkey patch get_base_form to cache calling mecab on the user's search
+        if mecab:
+            tokenize_with_positions = memoize_search_term(tokenize_with_positions, search_word)
+
+        all_results = []
+
+        with ThreadPoolExecutor() as executor:
+            try:
+                futures = []
+                for path in paths:
+                    if path.endswith('.epub') or path.endswith('.mokuro'):
+                        futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
+
+                output_manager.output_global_header()
+                first = True
+                # Collect results
+                for future in as_completed(futures):
+                    volume_results = future.result()
+                    if volume_results:
+                        output_manager.output_volume_results(volume_results, first=first)
+                        first = False
+                output_manager.output_global_footer()
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
     except KeyboardInterrupt:
         logging.info(f"Interrupted by user. Terminating...")
         sys.exit(1)

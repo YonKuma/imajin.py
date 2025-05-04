@@ -4,6 +4,24 @@
 
 ---
 
+## Index
+
+- [Features](#features)
+- [Installation](#installation)  
+  - [Install with pip (preferred method)](#install-with-pip-preferred-method)  
+  - [Download and install script](#download-and-install-script)  
+  - [Dependencies](#dependencies)
+- [Usage](#usage)  
+  - [Positional Arguments](#positional-arguments)  
+  - [Options](#options)
+- [Examples](#examples)  
+  - [Installed](#installed)  
+  - [As a script](#as-a-script)
+- [Saving Results](#saving-results)
+- [Notes](#notes)
+- [License](#license)
+
+---
 
 ## Features
 
@@ -18,21 +36,58 @@
 
 ## Installation
 
-1. Install Python 3.9+ if not already installed.
-2. Install dependencies:
+### Install with pip (preferred method)
 
-```bash
-pip install -r requirements.txt
-```
+Recommended because it will be easier to update going forward, especially if you prefer to have the script installed.
+
+1. Install Python 3.9+ if not allready installed
+2. Install imajin using pip:
+
+    ```bash
+    pip install imajin
+    ```
+
+    You should be all set up to use `imajin` directly from the command line. 
+
+### Download and install script
+
+Not recommended, because it's harder to update.
+
+1. Install Python 3.9+ if not already installed.
+2. Download the source folder, either by downloading the Source code from the [Latest Release](https://github.com/YonKuma/imajin.py/releases/tag/v1.1.1) or using `git clone https://github.com/YonKuma/imajin.py.git`
+3. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   You can now use `imajin.py` as a python script. For example, if you're in the source directory, you can use `python imajin.py -r 蹴散らす ~/Documents/Manga`, but you'll need to use a qualified path to the files you want to search
+4. (Optional) You can install imajin by copying the script to somewhere in your PATH and making it executable
+
+    ```bash
+    sudo cp imajin.py /usr/local/bin/imajin
+    sudo chmod +x /usr/local/bin/imajin
+    ```
+
+### Dependencies
 
 Dependencies:
 - [beautifulsoup4](https://pypi.org/project/beautifulsoup4/)
 - [lxml](https://pypi.org/project/lxml/)
 - [mecab-python3](https://github.com/SamuraiT/mecab-python3) (optional; fuzzy matching will be disabled if MeCab is not available)
+- unidic-lite (optional; used for fuzzy matching. Other dictionaries should work but are harder to install)
 
 ---
 
 ## Usage
+
+Installed:
+
+```bash
+imajin [options] <search_word> <file_or_directory>
+```
+
+As a script:
 
 ```bash
 python imajin.py [options] <search_word> <file_or_directory>
@@ -55,6 +110,34 @@ python imajin.py [options] <search_word> <file_or_directory>
 ---
 
 ## Examples
+
+### Installed
+
+Search for the word "慌ただしい" inside your book collection:
+
+```bash
+imajin 慌ただしい ./books/
+```
+
+Find exact matches only, searching all subdirectories:
+
+```bash
+imajin --no-fuzzy -r 慌ただしい ./novel-library/
+```
+
+Get markdown-formatted results:
+
+```bash
+imajin 慌ただしい ./books/ --format markdown
+```
+
+Save the results in a JSON file for further processing:
+
+```bash
+imajin 慌ただしい ./manga-collection/ --format json > results.json
+```
+
+### As a script
 
 Search for the word "慌ただしい" inside your book collection:
 
@@ -87,10 +170,10 @@ python imajin.py 慌ただしい ./manga-collection/ --format json > results.jso
 To save your search results to a file, redirect the output:
 
 ```bash
-python imajin.py 慌ただしい ./books/ --format markdown > examples.md
+imajin 慌ただしい ./books/ --format md > examples.md
 ```
 
-This method works for all output formats (text, markdown, or JSON).
+This method works for all output formats (text, markdown/md, or JSON).
 
 ---
 

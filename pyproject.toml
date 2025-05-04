@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "imajin"
+dynamic = ["version"]
+dependencies = [
+    "lxml",
+    "beautifulsoup4",
+    "mecab-python3",
+    "unidic-lite"
+]
+requires-python = ">=3.9"
+authors = [{ name = "YonKuma", email = "kumarei@gmail.com" }]
+description = "Search tool for Japanese text in EPUB and Mokuro files"
+readme = "README.md"
+license = "CC-PDDC"
+license-files = ["LICEN[CS]E.*"]
+keywords = ["japanese", "ebook", "manga", "text-search", "example-sentences"]
+classifiers = [
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Utilities",
+    "Environment :: Console",
+    "Natural Language :: Japanese",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Repository = "https://github.com/YonKuma/imajin.py"
+
+[tool.hatch.build.targets.wheel]
+include = ["imajin.py"]
+
+[tool.hatch.version]
+path = "imajin.py"
+
+[project.scripts]
+imajin = "imajin:main"
