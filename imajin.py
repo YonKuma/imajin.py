@@ -34,7 +34,7 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.1"
+__version__ = "v1.3.1.post0"
 
 mecab = None
 
