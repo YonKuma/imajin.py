@@ -1,3 +1,4 @@
+lxml
 beautifulsoup4
 mecab-python3
-lxml
+unidic-lite
