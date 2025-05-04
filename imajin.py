@@ -27,12 +27,13 @@ import os
 import re
 import sys
 import json
+import signal
 from collections import defaultdict
 from functools import lru_cache
 from typing import List, Optional, Any
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 mecab = None
@@ -806,7 +807,9 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
 
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
-if __name__ == '__main__':
+def main():
+    global tokenize_with_positions, mecab
+
     search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
 
     # Map verbosity to logging levels
@@ -867,17 +870,28 @@ if __name__ == '__main__':
     all_results = []
 
     with ThreadPoolExecutor() as executor:
-        futures = []
-        for path in paths:
-            if path.endswith('.epub') or path.endswith('.mokuro'):
-                futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
+        try:
+            futures = []
+            for path in paths:
+                if path.endswith('.epub') or path.endswith('.mokuro'):
+                    futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
 
-        output_manager.output_global_header()
-        first = True
-        # Collect results
-        for future in futures:
-            volume_results = future.result()
-            if volume_results:
-                output_manager.output_volume_results(volume_results, first=first)
-                first = False
-        output_manager.output_global_footer()
+            output_manager.output_global_header()
+            first = True
+            # Collect results
+            for future in as_completed(futures):
+                volume_results = future.result()
+                if volume_results:
+                    output_manager.output_volume_results(volume_results, first=first)
+                    first = False
+            output_manager.output_global_footer()
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.info(f"Interrupted by user. Terminating...")
+        sys.exit(1)
