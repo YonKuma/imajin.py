@@ -54,7 +54,7 @@ Recommended because it will be easier to update going forward, especially if you
 Not recommended, because it's harder to update.
 
 1. Install Python 3.9+ if not already installed.
-2. Download the source folder, either by downloading the Source code from the [Latest Release](https://github.com/YonKuma/imajin.py/releases/tag/v1.1.1) or using `git clone https://github.com/YonKuma/imajin.py.git`
+2. Download the source folder, either by downloading the Source code from the [Latest Release](https://github.com/YonKuma/imajin.py/releases/latest) or using `git clone https://github.com/YonKuma/imajin.py.git`
 3. Install dependencies:
 
    ```bash
