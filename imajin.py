@@ -520,7 +520,8 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
             fields = feature_str.split(sep)
             for i, field in enumerate(fields):
                 if field == "食べる":
-                    logging.debug(f"Identified MeCab dictionary separator: {'tab' if sep == '\t' else sep}")
+                    sepString = 'tab' if sep == '\t' else sep
+                    logging.debug(f"Identified MeCab dictionary separator: {sepString}")
                     logging.debug(f"Identified MeCab base index: {i}")
                     return sep, i
 
@@ -892,3 +893,6 @@ def main():
     except KeyboardInterrupt:
         logging.info(f"Interrupted by user. Terminating...")
         sys.exit(1)
+
+if __name__ == '__main__':
+    main()
