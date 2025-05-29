@@ -29,12 +29,12 @@ import sys
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Union
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.2"
+__version__ = "v1.3.3"
 
 mecab = None
 
@@ -444,7 +444,7 @@ class Result:
         self.snippet = snippet  # (snippet_text, match_start, match_end)
         self.absolute_position = absolute_position
 
-    def to_dict(self, mode: str = 'text') -> dict[str, str | dict[str, str | int]]:
+    def to_dict(self, mode: str = 'text') -> dict[str, Union[str, dict[str, Union[str, int]]]]:
         """Return a dictionary version of the result for output."""
         snippet_text, match_start, match_end = self.snippet
         matched_text = snippet_text[match_start:match_end]
