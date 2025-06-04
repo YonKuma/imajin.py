@@ -34,9 +34,7 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.3"
-
-mecab = None
+__version__ = "v1.3.4a0"
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
@@ -491,7 +489,7 @@ class Result:
 
 # Cache the function's results since they should be universal
 @lru_cache(maxsize=1)
-def detect_feature_separator_and_index() -> tuple[str, int]:
+def detect_feature_separator_and_index(mecab) -> tuple[str, int]:
     """
     Detect the separator character and index for the base form feature.
     Returns a tuple (separator, index).
@@ -529,7 +527,7 @@ def detect_feature_separator_and_index() -> tuple[str, int]:
     # Default fallback if detection fails
     return ',', 6
 
-def get_base_form(line: str) -> tuple[str, str]:
+def get_base_form(line: str, mecab) -> tuple[str, str]:
     """
     Extract surface and base form from a MeCab line, using detected format.
     """
@@ -539,7 +537,7 @@ def get_base_form(line: str) -> tuple[str, str]:
         return line, line
 
     surface, feature_str = parts
-    separator, base_form_index = detect_feature_separator_and_index()
+    separator, base_form_index = detect_feature_separator_and_index(mecab)
 
     fields = feature_str.split(separator)
     if (
@@ -554,17 +552,17 @@ def memoize_search_term(func, search_term):
     """Cache the results of fetching mecab base for the user's search term"""
     cache = {}
 
-    def wrapper(word):
+    def wrapper(word, *args, **kwargs):
         if word == search_term:
             if word not in cache:
-                cache[word] = func(word)
+                cache[word] = func(word, *args, **kwargs)
                 logging.debug(f"Tokenized search term: {', '.join(' | '.join(map(str, t)) for t in cache[word])}")
             return cache[word]
-        return func(word)
+        return func(word, *args, **kwargs)
 
     return wrapper
 
-def tokenize_with_positions(text: str) -> Optional[List[tuple[str, str, int]]]:
+def tokenize_with_positions(text: str, mecab) -> Optional[List[tuple[str, str, int]]]:
     """Tokenize a text string into a tuple of (surface, base, found_pos)"""
     parsed_text = mecab.parse(text)
     if parsed_text is None:
@@ -576,7 +574,7 @@ def tokenize_with_positions(text: str) -> Optional[List[tuple[str, str, int]]]:
     for line in parsed_text.splitlines():
         if line == 'EOS' or line.strip() == '':
             continue
-        surface, base = get_base_form(line)
+        surface, base = get_base_form(line, mecab)
         # Search for the unprocessed text in the original corpus
         # Workaround to get an accurate text location
         found_pos = text.find(surface, cursor)
@@ -586,21 +584,21 @@ def tokenize_with_positions(text: str) -> Optional[List[tuple[str, str, int]]]:
         cursor = found_pos + len(surface)
     return text_tokens
 
-def fuzzy_match(text: str, search_term: str) -> tuple[int, int]:
+def fuzzy_match(text: str, search_term: str, mecab) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_term and text."""
     if mecab is None:
         return -1, 0
 
     # Tokenize the search and fetch bases
     search_bases = None
-    if search_tokens := tokenize_with_positions(search_term):
+    if search_tokens := tokenize_with_positions(search_term, mecab):
         search_bases = [base for (_, base, _) in search_tokens]
 
     if not search_bases:
         return -1, 0
 
     # Tokenize the corpus text to compare bases
-    text_tokens = tokenize_with_positions(text)
+    text_tokens = tokenize_with_positions(text, mecab)
 
     if not text_tokens:
         return -1, 0
@@ -619,7 +617,7 @@ def fuzzy_match(text: str, search_term: str) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_term: str, use_fuzzy: bool = True) -> List[tuple[int, int]]:
+def find_matches(text: str, search_term: str, mecab, use_fuzzy: bool = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
@@ -636,7 +634,7 @@ def find_matches(text: str, search_term: str, use_fuzzy: bool = True) -> List[tu
     if use_fuzzy and mecab:
         start = 0
         while start < len(text):
-            fuzzy_idx, fuzzy_len = fuzzy_match(text[start:], search_term)
+            fuzzy_idx, fuzzy_len = fuzzy_match(text[start:], search_term, mecab)
             if fuzzy_idx == -1:
                 break
             absolute_idx = start + fuzzy_idx
@@ -721,7 +719,7 @@ def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
 
     return None
 
-def search_volume(volume: Volume, search_term: str, use_fuzzy: bool = True) -> List[dict[str, str]]:
+def search_volume(volume: Volume, search_term: str, mecab, use_fuzzy: bool = True) -> List[dict[str, str]]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
@@ -729,7 +727,7 @@ def search_volume(volume: Volume, search_term: str, use_fuzzy: bool = True) -> L
     logging.info(f"Searching volume {volume.get_filename()}")
 
     for section in volume.get_sections():
-        matches = find_matches(section.get_text(), search_term, use_fuzzy)
+        matches = find_matches(section.get_text(), search_term, mecab, use_fuzzy)
 
         for idx, match_len in matches:
             snippet = section.extract_snippet(idx, match_len)
@@ -741,7 +739,7 @@ def search_volume(volume: Volume, search_term: str, use_fuzzy: bool = True) -> L
 
     return results
 
-def safe_search_volume(path, search_term, use_fuzzy):
+def safe_search_volume(path, search_term, mecab, use_fuzzy):
     try:
         if path.endswith('.epub'):
             volume = EpubVolume(path)
@@ -749,7 +747,7 @@ def safe_search_volume(path, search_term, use_fuzzy):
             volume = MokuroVolume(path)
         else:
             return None
-        return search_volume(volume, search_term, use_fuzzy=use_fuzzy)
+        return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
     except VolumeLoadError as e:
         logging.error(f"{e}")
         return None
@@ -808,11 +806,19 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
 
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
-def main():
+def main(
+    search_word: str = None,
+    target_path: str = None,
+    use_fuzzy: bool = None,
+    recursive: bool = None,
+    output_format: str = None,
+    verbosity: int = None
+):
     try:
-        global tokenize_with_positions, mecab
+        global tokenize_with_positions
 
-        search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
+        if None in (search_word, target_path, use_fuzzy, recursive, output_format, verbosity):
+            search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
 
         # Map verbosity to logging levels
         log_level = {
@@ -830,12 +836,13 @@ def main():
         logging.info(f"Target path: {target_path}")
         logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
 
+        mecab = None
+
         if use_fuzzy:
             try:
                 import MeCab
                 mecab = MeCab.Tagger()
             except (ImportError, RuntimeError) as e:
-                mecab = None
                 logging.info("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
             else:
                 logging.info("MeCab enabled")
@@ -876,7 +883,7 @@ def main():
                 futures = []
                 for path in paths:
                     if path.endswith('.epub') or path.endswith('.mokuro'):
-                        futures.append(executor.submit(safe_search_volume, path, search_word, use_fuzzy))
+                        futures.append(executor.submit(safe_search_volume, path, search_word, mecab, use_fuzzy))
 
                 output_manager.output_global_header()
                 first = True
@@ -892,7 +899,7 @@ def main():
                 raise
     except KeyboardInterrupt:
         logging.info(f"Interrupted by user. Terminating...")
-        sys.exit(1)
+        sys.exit(0)
 
 if __name__ == '__main__':
     main()
