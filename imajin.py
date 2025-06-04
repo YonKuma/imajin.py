@@ -34,7 +34,7 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.4a0"
+__version__ = "v1.3.4a1"
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
@@ -370,6 +370,155 @@ class MokuroPage(Section):
 
     def get_display_name(self) -> str:
         return f"{self.page_number}"
+
+class SrtVolume(Volume):
+    """Volume class for handling srt subtitle files"""
+
+    def __init__(self, path: str):
+        self.path: str = path
+        self.entries: List[SrtEntry] = []
+        try:
+            with open(self.path, 'r', encoding='utf-8-sig') as f:
+                block = []
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        block.append(line)
+                    else:
+                        self._parse_entry(block)
+                        block = []
+                if block:
+                    self._parse_entry(block)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
+        self.total_text_length: int = sum(len(entry.get_text()) for entry in self.entries)
+
+    def _parse_entry(self, block):
+        if len(block) < 2:
+            return
+        index = int(block[0]) if block[0].isdigit() else None
+        times = block[1]
+        start_str, end_str = times.split(' --> ')
+        text = '\t'.join(block[2:])
+        self.entries.append(SrtEntry(index, start_str, end_str, text))
+
+    def get_sections(self) -> List[Section]:
+        """Return all sections in the volume."""
+        return self.entries
+
+    def get_total_length(self) -> int:
+        """Return total text length of the volume."""
+        return self.total_text_length
+
+    def get_filename(self) -> str:
+        """Return the base filename of the volume."""
+        return os.path.basename(self.path)
+
+class SrtEntry(Section):
+    """Section class representing an srt entry"""
+
+    def __init__(self, index, start, end, text):
+        self.index = index
+        self.start = start
+        self.end = end
+        self.text = text
+
+    def get_text(self):
+        return self.text
+        pass
+
+    def get_display_type(self) -> str:
+        return "Timestamp"
+
+    def get_display_name(self) -> str:
+        return self.start
+
+    def extract_snippet(self, idx: int, length: int) -> tuple[str, int, int]:
+       return make_snippet(self.text, idx=idx, length=length)
+
+class AssVolume(Volume):
+    """Volume class for handling ass subtitle files"""
+
+    def __init__(self, path: str):
+        self.path: str = path
+        self.lines: List[AssLine] = []
+        try:
+            with open(self.path, 'r', encoding='utf-8-sig') as f:
+                block = []
+                for line in f:
+                    line = line.strip()
+
+                    if line.startswith("[Events]"):
+                        in_events = True
+                        continue
+                    elif line.startswith("["):
+                        in_events = False
+                        continue
+
+                    if in_events:
+                        if line.startswith("Format:"):
+                            self.dialogue_format = self._parse_format(line)
+                            logging.debug(f"Dialogue format: {self.dialogue_format}")
+                        elif line.startswith("Dialogue:"):
+                            self._parse_dialogue(line)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
+        self.total_text_length: int = sum(len(line.get_text()) for line in self.lines)
+
+    def _parse_format(self, line):
+        # Example: Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+        _, fields = line.split(":", 1)
+        return [field.strip().lower() for field in fields.split(",")]
+
+    def _parse_dialogue(self, line):
+        # Example: Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,こんにちは。
+        _, data = line.split(":", 1)
+        values = [v.strip() for v in data.split(",", len(self.dialogue_format) - 1)]
+        field_map = dict(zip(self.dialogue_format, values))
+
+        start = field_map.get("start")
+        end = field_map.get("end")
+        text = self._clean_ass_text(field_map.get("text", ""))
+
+        self.lines.append(AssLine(start, end, text))
+
+    def _clean_ass_text(self, text):
+        # Remove override tags like {\i1}, {\pos(...)} etc., and handle line breaks
+        text = re.sub(r"{.*?}", "", text)
+        return text.replace(r"\N", "\n").replace(r"\n", "\t").strip()
+
+    def get_sections(self) -> List[Section]:
+        """Return all sections in the volume."""
+        return self.lines
+
+    def get_total_length(self) -> int:
+        """Return total text length of the volume."""
+        return self.total_text_length
+
+    def get_filename(self) -> str:
+        """Return the base filename of the volume."""
+        return os.path.basename(self.path)
+
+class AssLine(Section):
+    """Section class representing an ass dialogue line"""
+
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+    def get_text(self):
+        return self.text
+        pass
+
+    def get_display_type(self) -> str:
+        return "Timestamp"
+
+    def get_display_name(self) -> str:
+        return self.start
+
+    def extract_snippet(self, idx: int, length: int) -> tuple[str, int, int]:
+       return make_snippet(self.text, idx=idx, length=length) 
 
 class OutputManager:
     def __init__(self, mode: str = 'text'):
@@ -745,6 +894,10 @@ def safe_search_volume(path, search_term, mecab, use_fuzzy):
             volume = EpubVolume(path)
         elif path.endswith('.mokuro'):
             volume = MokuroVolume(path)
+        elif path.endswith('.srt'):
+            volume = SrtVolume(path)
+        elif path.endswith('.ass'):
+            volume = AssVolume(path)
         else:
             return None
         return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
@@ -853,15 +1006,15 @@ def main(
                     paths = []
                     for root, dirs, files in os.walk(target_path):
                         for f in files:
-                            if f.endswith(('.epub', '.mokuro')):
+                            if f.endswith(('.epub', '.mokuro', '.srt', '.ass')):
                                 paths.append(os.path.join(root, f))
                 else:
                     paths = [
                         os.path.join(target_path, f)
                         for f in os.listdir(target_path)
-                        if f.endswith(('.epub', '.mokuro'))
+                        if f.endswith(('.epub', '.mokuro', '.srt', '.ass'))
                     ]
-            elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro')):
+            elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro', '.srt', '.ass')):
                 paths = [target_path]
             else:
                 logging.error(f"'{target_path}' is not a valid file or directory.")
@@ -882,7 +1035,7 @@ def main(
             try:
                 futures = []
                 for path in paths:
-                    if path.endswith('.epub') or path.endswith('.mokuro'):
+                    if path.endswith('.epub') or path.endswith('.mokuro') or path.endswith('.srt')  or path.endswith('.ass'):
                         futures.append(executor.submit(safe_search_volume, path, search_word, mecab, use_fuzzy))
 
                 output_manager.output_global_header()

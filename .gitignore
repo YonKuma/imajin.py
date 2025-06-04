@@ -173,5 +173,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Dev stuff
+dev/
+
 # OS Junk
 .DS_Store
