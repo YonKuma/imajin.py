@@ -27,29 +27,53 @@ import os
 import re
 import sys
 import json
+from json import JSONDecodeError
 from collections import defaultdict
 from functools import lru_cache
-from typing import List, Optional, Any, Union
+from typing import List, Optional, Iterable, Any, Union, TypeVar, Callable, cast
+from typing_extensions import ParamSpec
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.4a2"
+__version__ = "v1.3.4a3"
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+def safe_tag(tag: Any) -> Optional[Tag]:
+    return tag if isinstance(tag, Tag) else None
+
+def safe_str_attr(tag: Tag, attr: str) -> Optional[str]:
+    val = tag.get(attr)
+    return val if isinstance(val, str) else None
 
 class VolumeLoadError(Exception):
     """Custom exception for errors loading Epub or Mokuro volumes."""
+    pass
+
+class ParseError(Exception):
+    """Custom exception for errors parsing Epub or Mokuro volumes."""
+    pass
+
+class TokenizationError(Exception):
+    """Custom exception for errors tokenizing a string."""
+    pass
+
+class UnsupportedFormatError(Exception):
+    """Custom exception for an invalid file format."""
     pass
 
 # Abstract classes for Volume and Chapter
 class Volume(ABC):
     """Abstract base class representing a searchable volume."""
     @abstractmethod
-    def get_sections(self):
+    def get_sections(self) -> List["Section"]:
         """Return all sections in the volume."""
         pass
 
     @abstractmethod
-    def get_total_length(self):
+    def get_total_length(self) -> int:
         """Return total text length of the volume."""
         pass
 
@@ -61,7 +85,7 @@ class Volume(ABC):
 class Section(ABC):
     """Abstract base class representing a searchable section of text."""
     @abstractmethod
-    def get_text(self):
+    def get_text(self) -> str:
         """Return the raw text of the section."""
         pass
 
@@ -87,12 +111,9 @@ class EpubVolume(Volume):
 
     def __init__(self, epub_path: str):
         self.epub_path: str = epub_path
-        # try:
         with zipfile.ZipFile(epub_path, 'r') as zf:
             self.manifest, self.spine, self.index, self.rootfile_path = self._parse_epub_metadata(zf)
             self.sections, self.total_text_length = self._extract_spine_documents(zf)
-        # except (zipfile.BadZipFile, FileNotFoundError, OSError, Exception) as e:
-        #     raise VolumeLoadError(f"Failed to load EPUB '{epub_path}': {e}") from e
         self.chapters = self._locate_chapter_names()
         logging.debug(f"Volume {self.get_filename()}: Chapters mapped:\n{self.chapters}\n")
 
@@ -107,7 +128,7 @@ class EpubVolume(Volume):
             full_path = posixpath.join(posixpath.dirname(self.rootfile_path), href)
             try:
                 content_raw = zip_file.read(full_path)
-            except KeyError as e:
+            except KeyError:
                 logging.warning(f"Volume {self.get_filename()}: Missing document '{full_path}'\n\tResults may be incomplete")
                 continue
             content = BeautifulSoup(content_raw, 'html.parser')
@@ -145,16 +166,23 @@ class EpubVolume(Volume):
             print(f"[ERROR] {e}", file=sys.stderr)
         return chapters
 
-    def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict, List[str], dict, str]:
+    def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict[str, str], tuple[str, ...], dict[str, str], str]:
         """Parse EPUB metadata and return manifest, spine, labels, and rootfile path."""
         try:
-            container = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
+            container: BeautifulSoup = BeautifulSoup(zip_file.read('META-INF/container.xml'), 'xml')
         except KeyError as e:
-            raise VolumeLoadError(f"Volume {self.get_filename()}:Missing META-INF/container.xml in EPUB archive") from e
+            raise VolumeLoadError(f"Volume {self.get_filename()}: Missing META-INF/container.xml in EPUB archive") from e
 
         try:
-            rootfile_path = container.find('rootfile')['full-path']
-        except (AttributeError, TypeError, KeyError) as e:
+            rootfile_element = safe_tag(container.find('rootfile'))
+            if (rootfile_element):
+                rootfile_path = rootfile_element['full-path']
+                if not isinstance(rootfile_path, str):
+                    raise ParseError("Invalid rootfile path")
+            else:
+                raise ParseError("Invalid rootfile element")
+
+        except (AttributeError, TypeError, KeyError, ParseError) as e:
             raise VolumeLoadError(f"Volume {self.get_filename()}: Malformed container.xml: could not find rootfile path") from e
         
         try:
@@ -163,22 +191,31 @@ class EpubVolume(Volume):
             raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
         content_path = posixpath.dirname(rootfile_path)
-        manifest = {item.get('id'): item.get('href') for item in opf.find_all('item')}
+        manifest: dict[str, str] = {}
+        for item in opf.find_all('item'):
+            if item_tag := safe_tag(item):
+                if (mid := safe_str_attr(item_tag, 'id')) and (href := safe_str_attr(item_tag, 'href')):
+                    manifest[mid] = href
+                else:
+                    logging.warning(f"Volume {self.get_filename()}: Malformed manifest item. Chapter data may be incomplete")
         inverse_manifest =  {v: k for k, v in manifest.items()}
-        spine = [item.get('idref') for item in opf.find_all('itemref')]
-        version = (pkg := opf.find('package')) and pkg.get('version')
-        major_version = version and int(version.split('.')[0])
+        spine = tuple(
+            ref
+            for item in opf.find_all('itemref')
+            if (tag := safe_tag(item)) and (ref := safe_str_attr(tag, 'idref'))
+        )
+        version = (pkg := safe_tag(opf.find('package'))) and safe_str_attr(pkg, 'version')
 
         logging.debug(f"Volume {self.get_filename()}: EPUB version {version}")
         logging.debug(f"Volume {self.get_filename()}: Total files - {len(manifest)}")
         logging.debug(f"Volume {self.get_filename()}: Text files - {len(spine)}")
 
-        nav_path = None
-        if nav_tag := opf.find('item', attrs={'properties': 'nav'}):
-            nav_path = nav_tag.get('href')
-        ncx_path = None
-        if ncx_tag := opf.find('item', attrs={'media-type': 'application/x-dtbncx+xml'}):
-            ncx_path = ncx_tag.get('href')
+        nav_path: Optional[str] = None
+        if nav_tag := safe_tag(opf.find('item', attrs={'properties': 'nav'})):
+            nav_path = safe_str_attr(nav_tag, 'href')
+        ncx_path: Optional[str] = None
+        if ncx_tag := safe_tag(opf.find('item', attrs={'media-type': 'application/x-dtbncx+xml'})):
+            ncx_path = safe_str_attr(ncx_tag, 'href')
 
         index = {}
 
@@ -192,51 +229,82 @@ class EpubVolume(Volume):
 
         return manifest, spine, index, rootfile_path
 
-    def _parse_nav_index(self, nav_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
+    def _parse_nav_index(self, nav_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
         index = {}
         nav_full_path = posixpath.join(content_path, nav_path)
         try:
             nav = BeautifulSoup(zip_file.read(nav_full_path), 'xml')
-            toc_nav = nav.find('nav', attrs={'epub:type': 'toc'})
-            if ol := toc_nav.find('ol'):
-                for li in ol.find_all('li', recursive=False):
-                    a_tag = li.find('a', recursive=True)
-                    if a_tag and (href := a_tag.get('href')):
-                        label = a_tag.get_text(strip=True)
+
+            toc_nav = safe_tag(nav.find('nav', attrs={'epub:type': 'toc'}))
+            if not toc_nav:
+                raise ParseError("Failed toc_nav parse")
+
+            ol = safe_tag(toc_nav.find('ol'))
+            if not ol:
+                raise ParseError("Failed ol parse")
+
+            for li in ol.find_all('li', recursive=False):
+                if li_tag := safe_tag(li):
+                    if a_tag := safe_tag(li_tag.find('a', recursive=True)):
+                        href: Optional[str] = safe_str_attr(a_tag, 'href')
+                        label: str = a_tag.get_text(strip=True)
+
+                        if (href is None):
+                            logging.warning(f"Volume {self.get_filename()}: Nav chapter skipped. Chapter data may be incomplete")
+                            continue
+
                         if '#' in href:
-                            file_part, frag = href.split('#', 1)
-                            index[inverse_manifest.get(file_part)] = label
+                            file_part, _ = href.split('#', 1)
                         else:
-                            index[inverse_manifest.get(href)] = label
-        except (KeyError, AttributeError, TypeError):
+                            file_part = href
+
+                        if mid := inverse_manifest.get(file_part):
+                            index[mid] = label
+                        else:
+                            logging.warning(f"Volume {self.get_filename()}: Chapter file {file_part} missing from manifest. Chapter data may be incomplete")
+                            continue
+
+        except (KeyError, AttributeError, TypeError, ParseError):
             logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
-            pass
 
         return index
 
-    def _parse_ncx_index(self, ncx_path, content_path, zip_file, inverse_manifest) -> dict[str, str]:
-        index = {}
+    def _parse_ncx_index(self, ncx_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
+        index: dict[str, str] = {}
         ncx_full_path = posixpath.join(content_path, ncx_path)
         try:
             ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
             for navpoint in ncx.find_all('navPoint'):
-                href = None
-                if content := navpoint.find('content'):
-                    href = content.get('src')
-                label = navpoint.navLabel.text.strip()
-                if '#' in href:
-                    file_part, frag = href.split('#', 1)
-                    index[inverse_manifest.get(file_part)] = label
-                else:
-                    index[inverse_manifest.get(href)] = label
+                if navpoint_tag := safe_tag(navpoint):
+                    href: Optional[str] = None
+                    if content := safe_tag(navpoint_tag.find('content')):
+                        href = safe_str_attr(content, 'src')
+
+                    label_tag = getattr(navpoint_tag, "navLabel", None)
+                    label = label_tag.text.strip() if label_tag and hasattr(label_tag, "text") else None
+
+                    if (href is None) or (label is None):
+                        logging.debug(f"Volume {self.get_filename()}: Invalid navpoint label. Chapter data may be incomplete")
+                        continue
+
+                    if '#' in href:
+                        file_part, _ = href.split('#', 1)
+                    else:
+                        file_part = href
+
+                    if mid := inverse_manifest.get(file_part):
+                        index[mid] = label
+                    else:
+                        logging.warning(f"Volume {self.get_filename()}: Chapter file {file_part} missing from manifest. Chapter data may be incomplete")
+                        continue
+
             logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
         except (KeyError, AttributeError, TypeError):
             logging.warning(f"Volume {self.get_filename()}: Index ncx file {ncx_path} missing or invalid")
-            pass
 
         return index
 
-    def get_sections(self) -> List['EpubSection']:
+    def get_sections(self) -> List['Section']:
         """Return all sections in the volume."""
         return list(self.sections.values())
 
@@ -251,11 +319,11 @@ class EpubVolume(Volume):
 class EpubSection(Section):
     """Section class representing a chapter inside an EPUB volume."""
 
-    def __init__(self, volume: EpubVolume, href: str, raw_text: str, content: BeautifulSoup):
+    def __init__(self, volume: EpubVolume, href: str, raw_text: str, content: Tag):
         self.volume: EpubVolume = volume
         self.href: str = href
         self.raw_text: str = raw_text
-        self.content: BeautifulSoup = content
+        self.content: Tag = content
         self._cached_chapter_name: Optional[str] = None
 
     def get_text(self) -> str:
@@ -264,7 +332,7 @@ class EpubSection(Section):
 
     def search_for_chapter_name(self) -> Optional[str]:
         """Search this section for something that looks like a chapter name"""
-        body = self.content.find('body')
+        body = safe_tag(self.content.find('body'))
         if body and (first_text_tag := get_first_innermost_block(body)):
             if self.looks_like_chapter_name(first_text_tag, body):
                 first_text = ' '.join(first_text_tag.stripped_strings).strip()
@@ -272,18 +340,16 @@ class EpubSection(Section):
         return None
 
     @staticmethod
-    def looks_like_chapter_name(tag: BeautifulSoup, body: BeautifulSoup) -> bool:
+    def looks_like_chapter_name(tag: Tag, body: Tag) -> bool:
         """Return True if the tag or any of its descendants has a unique class or is a heading tag."""
         heading_tags = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
 
         # Count all class frequencies in the body
-        class_counts = {}
+        class_counts: dict[str, int] = {}
         for node in body.find_all(True):
-            if isinstance(node, Tag):
-                cls = node.get('class')
-                if cls:
-                    for c in cls:
-                        class_counts[c] = class_counts.get(c, 0) + 1
+            if (node_tag := safe_tag(node)) and (cls := node_tag.get_attribute_list('class')):
+                for c in cls:
+                    class_counts[c] = class_counts.get(c, 0) + 1
         unique_classes = {c for c, count in class_counts.items() if count == 1}
 
         # Check the tag and its descendants
@@ -293,7 +359,7 @@ class EpubSection(Section):
                 if node.name in heading_tags:
                     return True
                 # Condition 2: tag has a unique class
-                cls = node.get('class')
+                cls = node.get_attribute_list('class')
                 if cls and any(c in unique_classes for c in cls):
                     return True
 
@@ -305,7 +371,7 @@ class EpubSection(Section):
     def get_display_type(self) -> str:
         return "Chapter"
 
-    def set_chapter_name(self, str):
+    def set_chapter_name(self, str: str) -> None:
         self._cached_chapter_name = str
 
     def get_display_name(self) -> str:
@@ -321,10 +387,10 @@ class MokuroVolume(Volume):
         self.path: str = path
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                self.data: dict = json.load(f)
+                self.data = json.load(f)
         except (FileNotFoundError, PermissionError, OSError, JSONDecodeError) as e:
             raise VolumeLoadError(f"Failed to load Mokuro file '{path}': {e}") from e
-        self.pages: List[MokuroPage] = [MokuroPage(self, i, page_data) for i, page_data in enumerate(self.data['pages'])]
+        self.pages: List[Section] = [MokuroPage(self, i, page_data) for i, page_data in enumerate(self.data['pages'])]
         self.total_text_length: int = sum(len(page.get_text()) for page in self.pages)
 
     def get_sections(self) -> List[Section]:
@@ -343,11 +409,11 @@ class MokuroVolume(Volume):
 class MokuroPage(Section):
     """Section class representing a page inside a Mokuro volume."""
 
-    def __init__(self, volume: MokuroVolume, index: int, page_data: dict):
+    def __init__(self, volume: MokuroVolume, index: int, page_data: dict[str, Any]):
         self.volume: MokuroVolume = volume
-        self.index: int = index
-        self.page_data: dict = page_data
-        self.page_number: int = index + 1
+        self.index = index
+        self.page_data = page_data
+        self.page_number = index + 1
         self.text: str = self._build_text()
 
     def _build_text(self) -> str:
@@ -376,7 +442,7 @@ class SrtVolume(Volume):
 
     def __init__(self, path: str):
         self.path: str = path
-        self.entries: List[SrtEntry] = []
+        self.entries: List[Section] = []
         try:
             with open(self.path, 'r', encoding='utf-8-sig') as f:
                 block = []
@@ -393,14 +459,13 @@ class SrtVolume(Volume):
             raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
         self.total_text_length: int = sum(len(entry.get_text()) for entry in self.entries)
 
-    def _parse_entry(self, block):
+    def _parse_entry(self, block: list[str]) -> None:
         if len(block) < 2:
             return
-        index = int(block[0]) if block[0].isdigit() else None
         times = block[1]
         start_str, end_str = times.split(' --> ')
         text = '\t'.join(block[2:])
-        self.entries.append(SrtEntry(index, start_str, end_str, text))
+        self.entries.append(SrtEntry(start_str, end_str, text))
 
     def get_sections(self) -> List[Section]:
         """Return all sections in the volume."""
@@ -417,15 +482,13 @@ class SrtVolume(Volume):
 class SrtEntry(Section):
     """Section class representing an srt entry"""
 
-    def __init__(self, index, start, end, text):
-        self.index = index
+    def __init__(self, start: str, end: str, text: str):
         self.start = start
         self.end = end
         self.text = text
 
-    def get_text(self):
+    def get_text(self) -> str:
         return self.text
-        pass
 
     def get_display_type(self) -> str:
         return "Timestamp"
@@ -441,10 +504,9 @@ class AssVolume(Volume):
 
     def __init__(self, path: str):
         self.path: str = path
-        self.lines: List[AssLine] = []
+        self.lines: List[Section] = []
         try:
             with open(self.path, 'r', encoding='utf-8-sig') as f:
-                block = []
                 for line in f:
                     line = line.strip()
 
@@ -465,12 +527,12 @@ class AssVolume(Volume):
             raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
         self.total_text_length: int = sum(len(line.get_text()) for line in self.lines)
 
-    def _parse_format(self, line):
+    def _parse_format(self, line: str) -> list[str]:
         # Example: Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         _, fields = line.split(":", 1)
         return [field.strip().lower() for field in fields.split(",")]
 
-    def _parse_dialogue(self, line):
+    def _parse_dialogue(self, line: str) -> None:
         # Example: Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,こんにちは。
         _, data = line.split(":", 1)
         values = [v.strip() for v in data.split(",", len(self.dialogue_format) - 1)]
@@ -480,9 +542,12 @@ class AssVolume(Volume):
         end = field_map.get("end")
         text = self._clean_ass_text(field_map.get("text", ""))
 
-        self.lines.append(AssLine(start, end, text))
+        if (start is not None) and (end is not None) and (text is not None):
+            self.lines.append(AssLine(start, end, text))
+        else:
+            logging.warning(f"Volume {self.get_filename()}: Skipped malformed dialogue line:\n{str}")
 
-    def _clean_ass_text(self, text):
+    def _clean_ass_text(self, text: str) -> str:
         # Remove override tags like {\i1}, {\pos(...)} etc., and handle line breaks
         text = re.sub(r"{.*?}", "", text)
         return text.replace(r"\N", "\n").replace(r"\n", "\t").strip()
@@ -502,14 +567,13 @@ class AssVolume(Volume):
 class AssLine(Section):
     """Section class representing an ass dialogue line"""
 
-    def __init__(self, start, end, text):
+    def __init__(self, start: str, end: str, text: str):
         self.start = start
         self.end = end
         self.text = text
 
-    def get_text(self):
+    def get_text(self) -> str:
         return self.text
-        pass
 
     def get_display_type(self) -> str:
         return "Timestamp"
@@ -524,11 +588,11 @@ class OutputManager:
     def __init__(self, mode: str = 'text'):
         self.mode = mode
 
-    def output_global_header(self):
+    def output_global_header(self) -> None:
         if self.mode == 'json':
             print("[")
 
-    def output_volume_results(self, results: List['Result'], first: bool = False):
+    def output_volume_results(self, results: List['Result'], first: bool = False) -> None:
         """Output all results for a single volume"""
         if self.mode == 'json':
             if not first:
@@ -538,11 +602,11 @@ class OutputManager:
         else:
             self._output_text_or_markdown(results)
 
-    def output_global_footer(self):
+    def output_global_footer(self) -> None:
         if self.mode == 'json':
             print("\n]")
 
-    def _print_indented(self, text):
+    def _print_indented(self, text: str) -> None:
         lines = text.splitlines()
         for i, line in enumerate(lines):
             end = '\n' if i < len(lines) - 1 else ''
@@ -567,8 +631,7 @@ class OutputManager:
                               else f"{field_name}: {field_value}")
                 print()
 
-    def _group_results_by_volume(self, results: List[dict[str, str]]) -> dict:
-        from collections import defaultdict
+    def _group_results_by_volume(self, results: List['Result']) -> dict[str, List['Result']]:
         grouped = defaultdict(list)
         for result in results:
             volume = result.volume.get_filename()
@@ -591,7 +654,7 @@ class Result:
         self.snippet = snippet  # (snippet_text, match_start, match_end)
         self.absolute_position = absolute_position
 
-    def to_dict(self, mode: str = 'text') -> dict[str, Union[str, dict[str, Union[str, int]]]]:
+    def to_dict(self, mode: str = 'text') -> dict[str, Any]:
         """Return a dictionary version of the result for output."""
         snippet_text, match_start, match_end = self.snippet
         matched_text = snippet_text[match_start:match_end]
@@ -602,11 +665,11 @@ class Result:
             location = (self.absolute_position / self.volume.get_total_length()) * 100
             location_field = f"{location:.2f}%"
 
-        result = {}
+        result: dict[str, Any] = {}
 
-        result["Volume"] = self.volume.get_filename();
+        result["Volume"] = self.volume.get_filename()
 
-        result[self.section.get_display_type()] = self.section.get_display_name();
+        result[self.section.get_display_type()] = self.section.get_display_name()
 
         if location_field:
             result["Location"] = location_field
@@ -638,13 +701,13 @@ class Result:
 
 # Cache the function's results since they should be universal
 @lru_cache(maxsize=1)
-def detect_feature_separator_and_index(mecab) -> tuple[str, int]:
+def detect_feature_separator_and_index(mecab: Any) -> tuple[str, int]:
     """
     Detect the separator character and index for the base form feature.
     Returns a tuple (separator, index).
     """
-    if mecab is None:
-        return ',', 6  # Fallback
+    # if mecab is None:
+    #     return ',', 6  # Fallback
 
     parsed = mecab.parse("食べ")
 
@@ -672,11 +735,11 @@ def detect_feature_separator_and_index(mecab) -> tuple[str, int]:
                     logging.debug(f"Identified MeCab base index: {i}")
                     return sep, i
 
-    logging.warning(f"Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
+    logging.warning("Unknown MeCab dictionary configuration. Fuzzy search may not function correctly")
     # Default fallback if detection fails
     return ',', 6
 
-def get_base_form(line: str, mecab) -> tuple[str, str]:
+def get_base_form(line: str, mecab: Any) -> tuple[str, str]:
     """
     Extract surface and base form from a MeCab line, using detected format.
     """
@@ -697,21 +760,26 @@ def get_base_form(line: str, mecab) -> tuple[str, str]:
 
     return surface, surface
 
-def memoize_search_term(func, search_term):
+def memoize_search_term(func: Callable[P, R], search_term: str) -> Callable[P, R]:
     """Cache the results of fetching mecab base for the user's search term"""
     cache = {}
 
-    def wrapper(word, *args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        if not args:
+            return func(*args, **kwargs)
+
+        word = args[0]
         if word == search_term:
             if word not in cache:
-                cache[word] = func(word, *args, **kwargs)
-                logging.debug(f"Tokenized search term: {', '.join(' | '.join(map(str, t)) for t in cache[word])}")
+                result = cache[word] = func(*args, **kwargs)
+                if isinstance(result, Iterable):
+                    logging.debug(f"Tokenized search term: {', '.join(' | '.join(map(str, t)) for t in result)}")
             return cache[word]
-        return func(word, *args, **kwargs)
+        return func(*args, **kwargs)
 
     return wrapper
 
-def tokenize_with_positions(text: str, mecab) -> Optional[List[tuple[str, str, int]]]:
+def tokenize_with_positions(text: str, mecab: Any) -> Optional[List[tuple[str, str, int]]]:
     """Tokenize a text string into a tuple of (surface, base, found_pos)"""
     parsed_text = mecab.parse(text)
     if parsed_text is None:
@@ -728,15 +796,13 @@ def tokenize_with_positions(text: str, mecab) -> Optional[List[tuple[str, str, i
         # Workaround to get an accurate text location
         found_pos = text.find(surface, cursor)
         if found_pos == -1:
-            return -1, 0
+            raise TokenizationError(f"Tokenization failed finding string '{cursor}' in string '{surface}'")
         text_tokens.append((surface, base, found_pos))
         cursor = found_pos + len(surface)
     return text_tokens
 
-def fuzzy_match(text: str, search_term: str, mecab) -> tuple[int, int]:
+def fuzzy_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_term and text."""
-    if mecab is None:
-        return -1, 0
 
     # Tokenize the search and fetch bases
     search_bases = None
@@ -766,7 +832,7 @@ def fuzzy_match(text: str, search_term: str, mecab) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_term: str, mecab, use_fuzzy: bool = True) -> List[tuple[int, int]]:
+def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
@@ -830,9 +896,9 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
     match_start_in_unstripped = idx - snippet_start
     match_end_in_unstripped = match_start_in_unstripped + length
 
-    # Strip leading/trailing whitespace and adjust match indexes accordingly
+    # Strip leading whitespace and adjust match indexes accordingly
     leading_ws = len(unstripped) - len(unstripped.lstrip())
-    trailing_ws = len(unstripped) - len(unstripped.rstrip())
+    # trailing_ws = len(unstripped) - len(unstripped.rstrip())
 
     # Adjust indices to stripped version
     stripped = unstripped.strip()
@@ -845,30 +911,31 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
 
     return stripped, match_start, match_end
 
-def get_first_innermost_block(body: BeautifulSoup) -> Optional[BeautifulSoup]:
+def get_first_innermost_block(body: Tag) -> Optional[Tag]:
     """Return the first innermost block-level tag with meaningful text."""
     block_tags = {'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
 
-    for tag in body.descendants:
-        if tag.name not in block_tags:
-            continue
+    for item in body.descendants:
+        if tag := safe_tag(item):
+            if tag.name not in block_tags:
+                continue
 
-        pure_text = ''.join(tag.stripped_strings).strip()
-        if not pure_text:
-            continue
+            pure_text = ''.join(tag.stripped_strings).strip()
+            if not pure_text:
+                continue
 
-        # Check if tag contains any nested block-level tags with content
-        for child in tag.descendants:
-            if child.name in block_tags:
-                child_text = ''.join(child.stripped_strings).strip()
-                if child_text:
-                    break
-        else:
-            return tag  # Return the full tag, not the text
+            # Check if tag contains any nested block-level tags with content
+            for child in tag.descendants:
+                if (child_tag := safe_tag(child)) and (child_tag.name in block_tags):
+                    child_text = ''.join(child_tag.stripped_strings).strip()
+                    if child_text:
+                        break
+            else:
+                return tag  # Return the full tag, not the text
 
     return None
 
-def search_volume(volume: Volume, search_term: str, mecab, use_fuzzy: bool = True) -> List[dict[str, str]]:
+def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True) -> List[Result]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
@@ -888,24 +955,21 @@ def search_volume(volume: Volume, search_term: str, mecab, use_fuzzy: bool = Tru
 
     return results
 
-def safe_search_volume(path, search_term, mecab, use_fuzzy):
-    try:
-        if path.endswith('.epub'):
-            volume = EpubVolume(path)
-        elif path.endswith('.mokuro'):
-            volume = MokuroVolume(path)
-        elif path.endswith('.srt'):
-            volume = SrtVolume(path)
-        elif path.endswith('.ass'):
-            volume = AssVolume(path)
-        else:
-            return None
-        return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
-    except VolumeLoadError as e:
-        logging.error(f"{e}")
-        return None
+def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool) -> List[Result]:
+    volume: Optional[Volume] = None
+    if path.endswith('.epub'):
+        volume = EpubVolume(path)
+    elif path.endswith('.mokuro'):
+        volume = MokuroVolume(path)
+    elif path.endswith('.srt'):
+        volume = SrtVolume(path)
+    elif path.endswith('.ass'):
+        volume = AssVolume(path)
+    else:
+        raise UnsupportedFormatError(f"{path} is not in a supported format")
+    return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
 
-def parse_args() -> tuple[str, str, bool, bool, str]:
+def parse_args() -> tuple[str, str, bool, bool, str, int]:
     """Parse command-line arguments using argparse with grouped help."""
     parser = argparse.ArgumentParser(
         description="imajin.py — Search inside EPUB (.epub) and Mokuro (.mokuro) files with optional fuzzy Japanese matching.",
@@ -960,18 +1024,24 @@ def parse_args() -> tuple[str, str, bool, bool, str]:
     return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
 
 def main(
-    search_word: str = None,
-    target_path: str = None,
-    use_fuzzy: bool = None,
-    recursive: bool = None,
-    output_format: str = None,
-    verbosity: int = None
-):
+    search_word: Optional[str] = None,
+    target_path: Optional[str] = None,
+    use_fuzzy: Optional[bool] = None,
+    recursive: Optional[bool] = None,
+    output_format: Optional[str] = None,
+    verbosity: Optional[int] = None
+) -> None:
     try:
         global tokenize_with_positions
 
-        if None in (search_word, target_path, use_fuzzy, recursive, output_format, verbosity):
-            search_word, target_path, use_fuzzy, recursive, output_format, verbosity = parse_args()
+        cl_search_word, cl_target_path, cl_use_fuzzy, cl_recursive, cl_output_format, cl_verbosity = parse_args()
+
+        search_word = search_word or cl_search_word
+        target_path = target_path or cl_target_path
+        use_fuzzy = use_fuzzy or cl_use_fuzzy
+        recursive = recursive or cl_recursive
+        output_format = output_format or cl_output_format
+        verbosity = verbosity or cl_verbosity
 
         # Map verbosity to logging levels
         log_level = {
@@ -993,12 +1063,14 @@ def main(
 
         if use_fuzzy:
             try:
-                import MeCab
+                import MeCab  # type: ignore
                 mecab = MeCab.Tagger()
-            except (ImportError, RuntimeError) as e:
+            except (ImportError, RuntimeError):
                 logging.info("MeCab not found. Fuzzy matching for Japanese conjugations will be disabled.")
             else:
                 logging.info("MeCab enabled")
+
+        supported_formats = ('.epub', '.mokuro', '.srt', '.ass')
 
         try:
             if os.path.isdir(target_path):
@@ -1006,15 +1078,15 @@ def main(
                     paths = []
                     for root, dirs, files in os.walk(target_path):
                         for f in files:
-                            if f.endswith(('.epub', '.mokuro', '.srt', '.ass')):
+                            if f.endswith(supported_formats):
                                 paths.append(os.path.join(root, f))
                 else:
                     paths = [
                         os.path.join(target_path, f)
                         for f in os.listdir(target_path)
-                        if f.endswith(('.epub', '.mokuro', '.srt', '.ass'))
+                        if f.endswith(supported_formats)
                     ]
-            elif os.path.isfile(target_path) and target_path.endswith(('.epub', '.mokuro', '.srt', '.ass')):
+            elif os.path.isfile(target_path) and target_path.endswith(supported_formats):
                 paths = [target_path]
             else:
                 logging.error(f"'{target_path}' is not a valid file or directory.")
@@ -1029,20 +1101,22 @@ def main(
         if mecab:
             tokenize_with_positions = memoize_search_term(tokenize_with_positions, search_word)
 
-        all_results = []
-
         with ThreadPoolExecutor() as executor:
             try:
                 futures = []
                 for path in paths:
-                    if path.endswith('.epub') or path.endswith('.mokuro') or path.endswith('.srt')  or path.endswith('.ass'):
+                    if path.endswith(supported_formats):
                         futures.append(executor.submit(safe_search_volume, path, search_word, mecab, use_fuzzy))
 
                 output_manager.output_global_header()
                 first = True
                 # Collect results
                 for future in as_completed(futures):
-                    volume_results = future.result()
+                    try:
+                        volume_results = future.result()
+                    except (UnsupportedFormatError, VolumeLoadError) as e:
+                        logging.error(f"{e}")
+                        continue
                     if volume_results:
                         output_manager.output_volume_results(volume_results, first=first)
                         first = False
@@ -1051,7 +1125,7 @@ def main(
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
     except KeyboardInterrupt:
-        logging.info(f"Interrupted by user. Terminating...")
+        logging.info("Interrupted by user. Terminating...")
         sys.exit(0)
 
 if __name__ == '__main__':
