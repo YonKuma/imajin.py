@@ -36,7 +36,7 @@ from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "v1.3.4a3"
+__version__ = "v1.3.4a4"
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -143,27 +143,24 @@ class EpubVolume(Volume):
         current_chapter = "Front Matter"
         chapters = {}
         # Check toc for chapter names
-        try:
-            if self.index:
-                for id in self.spine:
-                    if section := self.sections.get(id):
-                        if id in self.index:
-                            current_chapter = self.index[id]
-                        chapters[id] = current_chapter
-                        section.set_chapter_name(current_chapter)
-                if chapters:
-                    logging.debug(f"Volume {self.get_filename()}: Chapters found by index")
-            else:
-                for id in self.spine:
-                    if section := self.sections.get(id):
-                        if chapter_name := section.search_for_chapter_name():
-                            current_chapter = chapter_name
-                        chapters[id] = current_chapter
-                        section.set_chapter_name(current_chapter)
-                if chapters:
-                    logging.debug(f"Volume {self.get_filename()}: Chapters found by text search")
-        except Exception as e:
-            print(f"[ERROR] {e}", file=sys.stderr)
+        if self.index:
+            for id in self.spine:
+                if section := self.sections.get(id):
+                    if id in self.index:
+                        current_chapter = self.index[id]
+                    chapters[id] = current_chapter
+                    section.set_chapter_name(current_chapter)
+            if chapters:
+                logging.debug(f"Volume {self.get_filename()}: Chapters found by index")
+        else:
+            for id in self.spine:
+                if section := self.sections.get(id):
+                    if chapter_name := section.search_for_chapter_name():
+                        current_chapter = chapter_name
+                    chapters[id] = current_chapter
+                    section.set_chapter_name(current_chapter)
+            if chapters:
+                logging.debug(f"Volume {self.get_filename()}: Chapters found by text search")
         return chapters
 
     def _parse_epub_metadata(self, zip_file: zipfile.ZipFile) -> tuple[dict[str, str], tuple[str, ...], dict[str, str], str]:
@@ -182,7 +179,7 @@ class EpubVolume(Volume):
             else:
                 raise ParseError("Invalid rootfile element")
 
-        except (AttributeError, TypeError, KeyError, ParseError) as e:
+        except (KeyError, ParseError) as e:
             raise VolumeLoadError(f"Volume {self.get_filename()}: Malformed container.xml: could not find rootfile path") from e
         
         try:
@@ -230,11 +227,15 @@ class EpubVolume(Volume):
         return manifest, spine, index, rootfile_path
 
     def _parse_nav_index(self, nav_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
-        index = {}
+        index: dict[str, str] = {}
         nav_full_path = posixpath.join(content_path, nav_path)
         try:
             nav = BeautifulSoup(zip_file.read(nav_full_path), 'xml')
+        except (KeyError):
+            logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
+            return index
 
+        try:
             toc_nav = safe_tag(nav.find('nav', attrs={'epub:type': 'toc'}))
             if not toc_nav:
                 raise ParseError("Failed toc_nav parse")
@@ -242,49 +243,18 @@ class EpubVolume(Volume):
             ol = safe_tag(toc_nav.find('ol'))
             if not ol:
                 raise ParseError("Failed ol parse")
+        except (ParseError):
+            logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} invalid")
+            return index
 
-            for li in ol.find_all('li', recursive=False):
-                if li_tag := safe_tag(li):
-                    if a_tag := safe_tag(li_tag.find('a', recursive=True)):
-                        href: Optional[str] = safe_str_attr(a_tag, 'href')
-                        label: str = a_tag.get_text(strip=True)
+        for li in ol.find_all('li', recursive=False):
+            if li_tag := safe_tag(li):
+                if a_tag := safe_tag(li_tag.find('a', recursive=True)):
+                    href: Optional[str] = safe_str_attr(a_tag, 'href')
+                    label: str = a_tag.get_text(strip=True)
 
-                        if (href is None):
-                            logging.warning(f"Volume {self.get_filename()}: Nav chapter skipped. Chapter data may be incomplete")
-                            continue
-
-                        if '#' in href:
-                            file_part, _ = href.split('#', 1)
-                        else:
-                            file_part = href
-
-                        if mid := inverse_manifest.get(file_part):
-                            index[mid] = label
-                        else:
-                            logging.warning(f"Volume {self.get_filename()}: Chapter file {file_part} missing from manifest. Chapter data may be incomplete")
-                            continue
-
-        except (KeyError, AttributeError, TypeError, ParseError):
-            logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
-
-        return index
-
-    def _parse_ncx_index(self, ncx_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
-        index: dict[str, str] = {}
-        ncx_full_path = posixpath.join(content_path, ncx_path)
-        try:
-            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
-            for navpoint in ncx.find_all('navPoint'):
-                if navpoint_tag := safe_tag(navpoint):
-                    href: Optional[str] = None
-                    if content := safe_tag(navpoint_tag.find('content')):
-                        href = safe_str_attr(content, 'src')
-
-                    label_tag = getattr(navpoint_tag, "navLabel", None)
-                    label = label_tag.text.strip() if label_tag and hasattr(label_tag, "text") else None
-
-                    if (href is None) or (label is None):
-                        logging.debug(f"Volume {self.get_filename()}: Invalid navpoint label. Chapter data may be incomplete")
+                    if (href is None):
+                        logging.warning(f"Volume {self.get_filename()}: Nav chapter skipped. Chapter data may be incomplete")
                         continue
 
                     if '#' in href:
@@ -298,9 +268,41 @@ class EpubVolume(Volume):
                         logging.warning(f"Volume {self.get_filename()}: Chapter file {file_part} missing from manifest. Chapter data may be incomplete")
                         continue
 
-            logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
-        except (KeyError, AttributeError, TypeError):
+        return index
+
+    def _parse_ncx_index(self, ncx_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
+        index: dict[str, str] = {}
+        ncx_full_path = posixpath.join(content_path, ncx_path)
+        try:
+            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+        except (KeyError):
             logging.warning(f"Volume {self.get_filename()}: Index ncx file {ncx_path} missing or invalid")
+            return index
+
+        for navpoint in ncx.find_all('navPoint'):
+            if navpoint_tag := safe_tag(navpoint):
+                href: Optional[str] = None
+                if content := safe_tag(navpoint_tag.find('content')):
+                    href = safe_str_attr(content, 'src')
+
+                label_tag = getattr(navpoint_tag, "navLabel", None)
+                label = label_tag.text.strip() if label_tag and hasattr(label_tag, "text") else None
+
+                if (href is None) or (label is None):
+                    logging.debug(f"Volume {self.get_filename()}: Invalid navpoint label. Chapter data may be incomplete")
+                    continue
+
+                if '#' in href:
+                    file_part, _ = href.split('#', 1)
+                else:
+                    file_part = href
+
+                if mid := inverse_manifest.get(file_part):
+                    index[mid] = label
+                else:
+                    logging.warning(f"Volume {self.get_filename()}: Chapter file {file_part} missing from manifest. Chapter data may be incomplete")
+                    continue
+        logging.debug(f"Volume {self.get_filename()}: Index ncx file found")
 
         return index
 
@@ -349,7 +351,8 @@ class EpubSection(Section):
         for node in body.find_all(True):
             if (node_tag := safe_tag(node)) and (cls := node_tag.get_attribute_list('class')):
                 for c in cls:
-                    class_counts[c] = class_counts.get(c, 0) + 1
+                    if c_str := c:
+                        class_counts[c] = class_counts.get(c_str, 0) + 1
         unique_classes = {c for c, count in class_counts.items() if count == 1}
 
         # Check the tag and its descendants
@@ -445,19 +448,22 @@ class SrtVolume(Volume):
         self.entries: List[Section] = []
         try:
             with open(self.path, 'r', encoding='utf-8-sig') as f:
-                block = []
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        block.append(line)
-                    else:
-                        self._parse_entry(block)
-                        block = []
-                if block:
-                    self._parse_entry(block)
+                self._parse_srt_file(f)
         except (FileNotFoundError, PermissionError, OSError) as e:
             raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
         self.total_text_length: int = sum(len(entry.get_text()) for entry in self.entries)
+
+    def _parse_srt_file(self, file: Iterable[str]) -> None:
+        block = []
+        for line in file:
+            line = line.strip()
+            if line:
+                block.append(line)
+            else:
+                self._parse_entry(block)
+                block = []
+        if block:
+            self._parse_entry(block)
 
     def _parse_entry(self, block: list[str]) -> None:
         if len(block) < 2:
@@ -507,25 +513,29 @@ class AssVolume(Volume):
         self.lines: List[Section] = []
         try:
             with open(self.path, 'r', encoding='utf-8-sig') as f:
-                for line in f:
-                    line = line.strip()
-
-                    if line.startswith("[Events]"):
-                        in_events = True
-                        continue
-                    elif line.startswith("["):
-                        in_events = False
-                        continue
-
-                    if in_events:
-                        if line.startswith("Format:"):
-                            self.dialogue_format = self._parse_format(line)
-                            logging.debug(f"Dialogue format: {self.dialogue_format}")
-                        elif line.startswith("Dialogue:"):
-                            self._parse_dialogue(line)
+                self._parse_ass_file(f)
         except (FileNotFoundError, PermissionError, OSError) as e:
             raise VolumeLoadError(f"Failed to load srt file '{path}': {e}") from e
         self.total_text_length: int = sum(len(line.get_text()) for line in self.lines)
+
+    def _parse_ass_file(self, file: Iterable[str]) -> None:
+        in_events: bool = False
+        for line in file:
+            line = line.strip()
+
+            if line.startswith("[Events]"):
+                in_events = True
+                continue
+            elif line.startswith("["):
+                in_events = False
+                continue
+
+            if in_events:
+                if line.startswith("Format:"):
+                    self.dialogue_format = self._parse_format(line)
+                    logging.debug(f"Dialogue format: {self.dialogue_format}")
+                elif line.startswith("Dialogue:"):
+                    self._parse_dialogue(line)
 
     def _parse_format(self, line: str) -> list[str]:
         # Example: Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -783,7 +793,7 @@ def tokenize_with_positions(text: str, mecab: Any) -> Optional[List[tuple[str, s
     """Tokenize a text string into a tuple of (surface, base, found_pos)"""
     parsed_text = mecab.parse(text)
     if parsed_text is None:
-        None
+        return None
 
     text_tokens = []
     cursor = 0  # Real character position inside text
@@ -969,7 +979,7 @@ def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fu
         raise UnsupportedFormatError(f"{path} is not in a supported format")
     return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
 
-def parse_args() -> tuple[str, str, bool, bool, str, int]:
+def parse_args() -> argparse.Namespace:
     """Parse command-line arguments using argparse with grouped help."""
     parser = argparse.ArgumentParser(
         description="imajin.py — Search inside EPUB (.epub) and Mokuro (.mokuro) files with optional fuzzy Japanese matching.",
@@ -1021,7 +1031,53 @@ def parse_args() -> tuple[str, str, bool, bool, str, int]:
     if args.format == "md":
         args.format = "markdown"
 
-    return args.search_word, args.target_path, args.use_fuzzy, args.recursive, args.format, args.verbose
+    return args
+
+def resolve_paths(target_path: str, recursive: bool, supported_formats: tuple[str, ...]) -> list[str]:
+    if os.path.isdir(target_path):
+        try:
+            if recursive:
+                return [
+                    os.path.join(root, f)
+                    for root, _, files in os.walk(target_path)
+                    for f in files
+                    if f.endswith(supported_formats)
+                ]
+            else:
+                return [
+                    os.path.join(target_path, f)
+                    for f in os.listdir(target_path)
+                    if f.endswith(supported_formats)
+                ]
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            raise VolumeLoadError(f"Failed accessing directory '{target_path}': {e}") from e
+
+    elif os.path.isfile(target_path):
+        if target_path.endswith(supported_formats):
+            return [target_path]
+        else:
+            raise ValueError(f"File '{target_path}' is not a supported format.")
+    else:
+        raise ValueError(f"'{target_path}' is not a valid file or directory.")
+
+def resolve_args(
+    search_word: Optional[str],
+    target_path: Optional[str],
+    use_fuzzy: Optional[bool],
+    recursive: Optional[bool],
+    output_format: Optional[str],
+    verbosity: Optional[int]
+) -> argparse.Namespace:
+    # CLI takes over if not explicitly set
+    cli_args = parse_args()
+    return argparse.Namespace(
+        search_word = search_word or cli_args.search_word,
+        target_path = target_path or cli_args.target_path,
+        use_fuzzy = use_fuzzy if use_fuzzy is not None else cli_args.use_fuzzy,
+        recursive = recursive if recursive is not None else cli_args.recursive,
+        format = output_format or cli_args.format,
+        verbosity = verbosity if verbosity is not None else cli_args.verbose
+    )
 
 def main(
     search_word: Optional[str] = None,
@@ -1034,34 +1090,27 @@ def main(
     try:
         global tokenize_with_positions
 
-        cl_search_word, cl_target_path, cl_use_fuzzy, cl_recursive, cl_output_format, cl_verbosity = parse_args()
-
-        search_word = search_word or cl_search_word
-        target_path = target_path or cl_target_path
-        use_fuzzy = use_fuzzy or cl_use_fuzzy
-        recursive = recursive or cl_recursive
-        output_format = output_format or cl_output_format
-        verbosity = verbosity or cl_verbosity
+        args = resolve_args(search_word, target_path, use_fuzzy, recursive, output_format, verbosity)
 
         # Map verbosity to logging levels
         log_level = {
             0: logging.WARNING,   # default
             1: logging.INFO,      # -v
             2: logging.DEBUG,     # -vv
-        }.get(verbosity, logging.DEBUG)  # -vvv or more
+        }.get(args.verbosity, logging.DEBUG)  # -vvv or more
 
         logging.basicConfig(
             level=log_level,
             format="%(levelname)s: %(message)s"
         )
 
-        logging.info(f"Search term: {search_word}")
-        logging.info(f"Target path: {target_path}")
-        logging.info(f"Recursive: {recursive}, Fuzzy: {use_fuzzy}, Format: {output_format}")
+        logging.info(f"Search term: {args.search_word}")
+        logging.info(f"Target path: {args.target_path}")
+        logging.info(f"Recursive: {args.recursive}, Fuzzy: {args.use_fuzzy}, Format: {args.format}")
 
         mecab = None
 
-        if use_fuzzy:
+        if args.use_fuzzy:
             try:
                 import MeCab  # type: ignore
                 mecab = MeCab.Tagger()
@@ -1073,40 +1122,23 @@ def main(
         supported_formats = ('.epub', '.mokuro', '.srt', '.ass')
 
         try:
-            if os.path.isdir(target_path):
-                if recursive:
-                    paths = []
-                    for root, dirs, files in os.walk(target_path):
-                        for f in files:
-                            if f.endswith(supported_formats):
-                                paths.append(os.path.join(root, f))
-                else:
-                    paths = [
-                        os.path.join(target_path, f)
-                        for f in os.listdir(target_path)
-                        if f.endswith(supported_formats)
-                    ]
-            elif os.path.isfile(target_path) and target_path.endswith(supported_formats):
-                paths = [target_path]
-            else:
-                logging.error(f"'{target_path}' is not a valid file or directory.")
-                sys.exit(1)
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            logging.error(f"Failed accessing path '{target_path}': {e}")
+            paths = resolve_paths(args.target_path, args.recursive, supported_formats)
+        except (VolumeLoadError, ValueError) as e:
+            logging.error(str(e))
             sys.exit(1)
 
-        output_manager = OutputManager(mode=output_format)
+        output_manager = OutputManager(mode=args.format)
 
         # Monkey patch get_base_form to cache calling mecab on the user's search
         if mecab:
-            tokenize_with_positions = memoize_search_term(tokenize_with_positions, search_word)
+            tokenize_with_positions = memoize_search_term(tokenize_with_positions, args.search_word)
 
         with ThreadPoolExecutor() as executor:
             try:
                 futures = []
                 for path in paths:
                     if path.endswith(supported_formats):
-                        futures.append(executor.submit(safe_search_volume, path, search_word, mecab, use_fuzzy))
+                        futures.append(executor.submit(safe_search_volume, path, args.search_word, mecab, args.use_fuzzy))
 
                 output_manager.output_global_header()
                 first = True
