@@ -22,21 +22,20 @@ A search tool for .epub and .mokuro files supporting exact and fuzzy matching.
 import argparse
 import logging
 import zipfile
-import posixpath
-import os
 import re
 import sys
 import json
 from json import JSONDecodeError
 from collections import defaultdict
 from functools import lru_cache
-from typing import List, Optional, Iterable, Any, Union, TypeVar, Callable, cast
+from typing import List, Optional, Iterable, Any, TypeVar, Callable
 from typing_extensions import ParamSpec
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path, PurePosixPath
 
-__version__ = "v1.3.4a4"
+__version__ = "v1.3.4a5"
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -125,9 +124,9 @@ class EpubVolume(Volume):
             href = self.manifest.get(idref)
             if not href:
                 continue
-            full_path = posixpath.join(posixpath.dirname(self.rootfile_path), href)
+            full_path = PurePosixPath(self.rootfile_path).parent / href
             try:
-                content_raw = zip_file.read(full_path)
+                content_raw = zip_file.read(str(full_path))
             except KeyError:
                 logging.warning(f"Volume {self.get_filename()}: Missing document '{full_path}'\n\tResults may be incomplete")
                 continue
@@ -187,7 +186,7 @@ class EpubVolume(Volume):
         except KeyError as e:
             raise VolumeLoadError(f"Volume {self.get_filename()}: Missing rootfile '{rootfile_path}' in EPUB archive") from e
 
-        content_path = posixpath.dirname(rootfile_path)
+        content_path = PurePosixPath(rootfile_path).parent
         manifest: dict[str, str] = {}
         for item in opf.find_all('item'):
             if item_tag := safe_tag(item):
@@ -217,20 +216,20 @@ class EpubVolume(Volume):
         index = {}
 
         if nav_path:
-            index = self._parse_nav_index(nav_path, content_path, zip_file, inverse_manifest)
+            index = self._parse_nav_index(nav_path, str(content_path), zip_file, inverse_manifest)
             logging.debug(f"Volume {self.get_filename()}: Parsed nav chapters:\n{index}\n")
 
         if not index and ncx_path:
-            index = self._parse_ncx_index(ncx_path, content_path, zip_file, inverse_manifest)
+            index = self._parse_ncx_index(ncx_path, str(content_path), zip_file, inverse_manifest)
             logging.debug(f"Volume {self.get_filename()}: Parsed ncx chapters:\n{index}\n")
 
         return manifest, spine, index, rootfile_path
 
     def _parse_nav_index(self, nav_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
         index: dict[str, str] = {}
-        nav_full_path = posixpath.join(content_path, nav_path)
+        nav_full_path = PurePosixPath(content_path) / nav_path
         try:
-            nav = BeautifulSoup(zip_file.read(nav_full_path), 'xml')
+            nav = BeautifulSoup(zip_file.read(str(nav_full_path)), 'xml')
         except (KeyError):
             logging.warning(f"Volume {self.get_filename()}: Index nav file {nav_path} missing or invalid")
             return index
@@ -272,9 +271,9 @@ class EpubVolume(Volume):
 
     def _parse_ncx_index(self, ncx_path: str, content_path: str, zip_file: zipfile.ZipFile, inverse_manifest: dict[str, str]) -> dict[str, str]:
         index: dict[str, str] = {}
-        ncx_full_path = posixpath.join(content_path, ncx_path)
+        ncx_full_path = PurePosixPath(content_path) / ncx_path
         try:
-            ncx = BeautifulSoup(zip_file.read(ncx_full_path), 'xml')
+            ncx = BeautifulSoup(zip_file.read(str(ncx_full_path)), 'xml')
         except (KeyError):
             logging.warning(f"Volume {self.get_filename()}: Index ncx file {ncx_path} missing or invalid")
             return index
@@ -316,7 +315,7 @@ class EpubVolume(Volume):
 
     def get_filename(self) -> str:
         """Return the base filename of the volume."""
-        return os.path.basename(self.epub_path)
+        return Path(self.epub_path).name
 
 class EpubSection(Section):
     """Section class representing a chapter inside an EPUB volume."""
@@ -406,7 +405,7 @@ class MokuroVolume(Volume):
 
     def get_filename(self) -> str:
         """Return the base filename of the volume."""
-        return os.path.basename(self.path)
+        return Path(self.path).name
 
 
 class MokuroPage(Section):
@@ -483,7 +482,7 @@ class SrtVolume(Volume):
 
     def get_filename(self) -> str:
         """Return the base filename of the volume."""
-        return os.path.basename(self.path)
+        return Path(self.path).name
 
 class SrtEntry(Section):
     """Section class representing an srt entry"""
@@ -572,7 +571,7 @@ class AssVolume(Volume):
 
     def get_filename(self) -> str:
         """Return the base filename of the volume."""
-        return os.path.basename(self.path)
+        return Path(self.path).name
 
 class AssLine(Section):
     """Section class representing an ass dialogue line"""
@@ -1033,30 +1032,27 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-def resolve_paths(target_path: str, recursive: bool, supported_formats: tuple[str, ...]) -> list[str]:
-    if os.path.isdir(target_path):
+def resolve_paths(target_path: str, recursive: bool, supported_formats: tuple[str, ...]) -> tuple[str, ...]:
+    target = Path(target_path)
+    if target.is_dir():
         try:
             if recursive:
-                return [
-                    os.path.join(root, f)
-                    for root, _, files in os.walk(target_path)
-                    for f in files
-                    if f.endswith(supported_formats)
-                ]
+                return tuple(
+                    str(f)
+                    for f in target.rglob("*")
+                    if f.is_file() and f.suffix in supported_formats
+                )
             else:
-                return [
-                    os.path.join(target_path, f)
-                    for f in os.listdir(target_path)
-                    if f.endswith(supported_formats)
-                ]
+                return tuple(
+                    str(f)
+                    for f in target.iterdir()
+                    if f.is_file() and f.suffix in supported_formats
+                )
         except (FileNotFoundError, PermissionError, OSError) as e:
             raise VolumeLoadError(f"Failed accessing directory '{target_path}': {e}") from e
 
-    elif os.path.isfile(target_path):
-        if target_path.endswith(supported_formats):
-            return [target_path]
-        else:
-            raise ValueError(f"File '{target_path}' is not a supported format.")
+    elif target.is_file() and target.suffix in supported_formats:
+        return tuple(target_path)
     else:
         raise ValueError(f"'{target_path}' is not a valid file or directory.")
 
