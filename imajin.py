@@ -35,7 +35,10 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.4.0a8"
+__version__ = "v1.4.0a9"
+
+sys.stdout.reconfigure(encoding='utf-8') # type: ignore
+sys.stderr.reconfigure(encoding='utf-8') # type: ignore
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -876,14 +879,13 @@ def fuzzy_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact = True) -> List[tuple[int, int]]:
+def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact: bool = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
 
     # Do exact string search
     if use_exact:
-        logging.debug("Not fuzzy only")
         while start < len(text):
             idx = text.find(search_term, start)
             if idx == -1:
