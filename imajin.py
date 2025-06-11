@@ -35,7 +35,7 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.3.4a6"
+__version__ = "v1.4.0a7"
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -876,18 +876,20 @@ def fuzzy_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True) -> List[tuple[int, int]]:
+def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact = True) -> List[tuple[int, int]]:
     """Find all exact and fuzzy matches in a given text."""
     matches = []
     start = 0
 
     # Do exact string search
-    while start < len(text):
-        idx = text.find(search_term, start)
-        if idx == -1:
-            break
-        matches.append((idx, len(search_term)))
-        start = idx + len(search_term)
+    if use_exact:
+        logging.debug("Not fuzzy only")
+        while start < len(text):
+            idx = text.find(search_term, start)
+            if idx == -1:
+                break
+            matches.append((idx, len(search_term)))
+            start = idx + len(search_term)
 
     # Do fuzzy string search
     if use_fuzzy and mecab:
@@ -950,7 +952,7 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
     match_end = match_start + length
     return adjust_match_indices(unstripped, match_start, match_end)
 
-def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True) -> List[Result]:
+def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact: bool = True) -> List[Result]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
@@ -958,7 +960,7 @@ def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fu
     logging.info(f"Searching volume {volume.get_filename()}")
 
     for section in volume.get_sections():
-        matches = find_matches(section.get_text(), search_term, mecab, use_fuzzy)
+        matches = find_matches(section.get_text(), search_term, mecab, use_fuzzy, use_exact)
 
         for idx, match_len in matches:
             snippet = section.extract_snippet(idx, match_len)
@@ -970,7 +972,7 @@ def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fu
 
     return results
 
-def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool) -> List[Result]:
+def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool, use_exact: bool = True) -> List[Result]:
     volume: Optional[Volume] = None
     if path.endswith('.epub'):
         volume = EpubVolume(path)
@@ -982,7 +984,7 @@ def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fu
         volume = AssVolume(path)
     else:
         raise UnsupportedFormatError(f"{path} is not in a supported format")
-    return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy)
+    return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy, use_exact=use_exact)
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments using argparse with grouped help."""
@@ -1008,6 +1010,13 @@ def parse_args() -> argparse.Namespace:
         "--no-fuzzy",
         action="store_false",
         dest="use_fuzzy",
+        help="Disable fuzzy matching (only exact matches)."
+    )
+
+    options.add_argument(
+        "--no-exact",
+        action="store_false",
+        dest="use_exact",
         help="Disable fuzzy matching (only exact matches)."
     )
 
@@ -1068,7 +1077,8 @@ def resolve_args(
     use_fuzzy: Optional[bool],
     recursive: Optional[bool],
     output_format: Optional[str],
-    verbosity: Optional[int]
+    verbosity: Optional[int],
+    use_exact: Optional[bool]
 ) -> argparse.Namespace:
     # CLI takes over if not explicitly set
     cli_args = parse_args()
@@ -1078,7 +1088,8 @@ def resolve_args(
         use_fuzzy = use_fuzzy if use_fuzzy is not None else cli_args.use_fuzzy,
         recursive = recursive if recursive is not None else cli_args.recursive,
         format = output_format or cli_args.format,
-        verbosity = verbosity if verbosity is not None else cli_args.verbose
+        verbosity = verbosity if verbosity is not None else cli_args.verbose,
+        use_exact = use_exact if use_exact is not None else cli_args.use_exact
     )
 
 def main(
@@ -1087,12 +1098,13 @@ def main(
     use_fuzzy: Optional[bool] = None,
     recursive: Optional[bool] = None,
     output_format: Optional[str] = None,
-    verbosity: Optional[int] = None
+    verbosity: Optional[int] = None,
+    use_exact: Optional[bool] = None
 ) -> None:
     try:
         global tokenize_with_positions
 
-        args = resolve_args(search_word, target_path, use_fuzzy, recursive, output_format, verbosity)
+        args = resolve_args(search_word, target_path, use_fuzzy, recursive, output_format, verbosity, use_exact)
 
         # Map verbosity to logging levels
         log_level = {
@@ -1138,7 +1150,7 @@ def main(
                 futures = []
                 for path in paths:
                     if path.endswith(supported_formats):
-                        futures.append(executor.submit(safe_search_volume, path, args.search_word, mecab, args.use_fuzzy))
+                        futures.append(executor.submit(safe_search_volume, path, args.search_word, mecab, args.use_fuzzy, args.use_exact))
 
                 output_manager.output_global_header()
                 first = True
