@@ -35,7 +35,7 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.4.0a7"
+__version__ = "v1.4.0a8"
 
 P = ParamSpec("P")
 R = TypeVar("R")
