@@ -13,9 +13,9 @@
 """
 imajin.py
 
-A search tool for .epub and .mokuro files supporting exact and fuzzy matching.
+A search tool for .epub and .mokuro files supporting exact and smart matching.
 - Supports structured searching of chapters (EPUB) and pages (Mokuro).
-- Highlights matched snippets with optional fuzzy Japanese language matching using MeCab.
+- Highlights matched snippets with optional smart Japanese language matching using MeCab.
 - Accepts a single file or an entire directory (with optional recursive search).
 """
 
@@ -25,6 +25,7 @@ import zipfile
 import re
 import sys
 import json
+import warnings
 from json import JSONDecodeError
 from collections import defaultdict
 from functools import lru_cache
@@ -35,7 +36,7 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.4.0a9"
+__version__ = "v1.4.0a10"
 
 sys.stdout.reconfigure(encoding='utf-8') # type: ignore
 sys.stderr.reconfigure(encoding='utf-8') # type: ignore
@@ -848,7 +849,7 @@ def tokenize_with_positions(text: str, mecab: Any) -> Optional[List[tuple[str, s
         cursor = found_pos + len(surface)
     return text_tokens
 
-def fuzzy_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
+def smart_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
     """Fuzzy match by comparing base form tokens of search_term and text."""
 
     # Tokenize the search and fetch bases
@@ -879,10 +880,12 @@ def fuzzy_match(text: str, search_term: str, mecab: Any) -> tuple[int, int]:
     return -1, 0
 
 
-def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact: bool = True) -> List[tuple[int, int]]:
-    """Find all exact and fuzzy matches in a given text."""
+def find_matches(text: str, search_term: str, mecab: Optional[Any], match: str = "both") -> List[tuple[int, int]]:
+    """Find all exact and smart matches in a given text."""
     matches = []
     start = 0
+    use_exact = match == "both" or match == "exact"
+    use_smart = match == "both" or match == "smart"
 
     # Do exact string search
     if use_exact:
@@ -893,16 +896,16 @@ def find_matches(text: str, search_term: str, mecab: Optional[Any], use_fuzzy: b
             matches.append((idx, len(search_term)))
             start = idx + len(search_term)
 
-    # Do fuzzy string search
-    if use_fuzzy and mecab:
+    # Do smart string search
+    if use_smart and mecab:
         start = 0
         while start < len(text):
-            fuzzy_idx, fuzzy_len = fuzzy_match(text[start:], search_term, mecab)
-            if fuzzy_idx == -1:
+            smart_idx, smart_len = smart_match(text[start:], search_term, mecab)
+            if smart_idx == -1:
                 break
-            absolute_idx = start + fuzzy_idx
-            matches.append((absolute_idx, fuzzy_len))
-            start = absolute_idx + fuzzy_len
+            absolute_idx = start + smart_idx
+            matches.append((absolute_idx, smart_len))
+            start = absolute_idx + smart_len
 
     return sorted(set(matches))
 
@@ -954,7 +957,7 @@ def make_snippet(text: str, idx: int = 0, length: int = 0, max_expand: int = 300
     match_end = match_start + length
     return adjust_match_indices(unstripped, match_start, match_end)
 
-def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, use_exact: bool = True) -> List[Result]:
+def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fuzzy: bool = True, match: str = "both") -> List[Result]:
     """Search a volume and return a list of match result dictionaries."""
     results = []
     current_text_position = 0
@@ -962,7 +965,7 @@ def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fu
     logging.info(f"Searching volume {volume.get_filename()}")
 
     for section in volume.get_sections():
-        matches = find_matches(section.get_text(), search_term, mecab, use_fuzzy, use_exact)
+        matches = find_matches(text=section.get_text(), search_term=search_term, mecab=mecab, match=match)
 
         for idx, match_len in matches:
             snippet = section.extract_snippet(idx, match_len)
@@ -974,7 +977,7 @@ def search_volume(volume: Volume, search_term: str, mecab: Optional[Any], use_fu
 
     return results
 
-def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fuzzy: bool, use_exact: bool = True) -> List[Result]:
+def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], match: str = "both", use_fuzzy: bool = True) -> List[Result]:
     volume: Optional[Volume] = None
     if path.endswith('.epub'):
         volume = EpubVolume(path)
@@ -986,12 +989,12 @@ def safe_search_volume(path: str, search_term: str, mecab: Optional[Any], use_fu
         volume = AssVolume(path)
     else:
         raise UnsupportedFormatError(f"{path} is not in a supported format")
-    return search_volume(volume, search_term, mecab, use_fuzzy=use_fuzzy, use_exact=use_exact)
+    return search_volume(volume=volume, search_term=search_term, mecab=mecab, match=match)
 
-def parse_args() -> argparse.Namespace:
+def get_cli_args() -> argparse.Namespace:
     """Parse command-line arguments using argparse with grouped help."""
     parser = argparse.ArgumentParser(
-        description="imajin.py — Search inside EPUB (.epub) and Mokuro (.mokuro) files with optional fuzzy Japanese matching.",
+        description="imajin.py — Search inside EPUB (.epub) and Mokuro (.mokuro) files with optional smart Japanese matching.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -1009,20 +1012,6 @@ def parse_args() -> argparse.Namespace:
     options = parser.add_argument_group("Options")
 
     options.add_argument(
-        "--no-fuzzy",
-        action="store_false",
-        dest="use_fuzzy",
-        help="Disable fuzzy matching (only exact matches)."
-    )
-
-    options.add_argument(
-        "--no-exact",
-        action="store_false",
-        dest="use_exact",
-        help="Disable fuzzy matching (only exact matches)."
-    )
-
-    options.add_argument(
         "-r", "--recursive",
         action="store_true",
         help="Recursively search subdirectories if a directory is specified."
@@ -1038,8 +1027,28 @@ def parse_args() -> argparse.Namespace:
     options.add_argument(
         "-v", "--verbose",
         action="count",
+        dest="verbosity",
         default=0,
         help="Increase output verbosity (e.g. -v, -vv, -vvv)"
+    )
+
+    options.add_argument(
+        "--match",
+        choices=["both", "exact", "smart"],
+        default="both",
+        help=(
+            "Matching strategy: "
+            "'exact' matches only the literal string, "
+            "'smart' uses MeCab tokenization and deconjugation, "
+            "'both' combines the results from both search strategies."
+        )
+    )
+
+    options.add_argument(
+        "--no-fuzzy",
+        action="store_false",
+        dest="use_fuzzy",
+        help="(DEPRECATED) Use --mach=exact instead. Will be removed in a future release"
     )
 
     args = parser.parse_args()
@@ -1047,7 +1056,34 @@ def parse_args() -> argparse.Namespace:
     if args.format == "md":
         args.format = "markdown"
 
+    if not args.use_fuzzy and args.match == "both":
+        args.match = "exact"
+
+    if not args.use_fuzzy:
+        print("WARNING: --no-fuzzy is deprecated and will be removed in a future release. Use --match=exact instead.", file=sys.stderr)
+
     return args
+
+def get_args(
+    *,
+    search_word: Optional[str] = None,
+    target_path: Optional[str] = None,
+    recursive: Optional[bool] = None,
+    output_format: Optional[str] = None,
+    verbosity: Optional[int] = None,
+    use_exact: Optional[bool] = None,
+    match: Optional[str] = None
+) -> argparse.Namespace:
+    if search_word is None or target_path is None:
+        return get_cli_args()
+    return argparse.Namespace(
+        search_word = search_word,
+        target_path = target_path,
+        recursive = False if recursive is None else recursive,
+        format="text" if output_format is None else output_format,
+        verbosity=0 if verbosity is None else verbosity,
+        match="both" if match is None else match
+    )
 
 def resolve_paths(target_path: str, recursive: bool, supported_formats: tuple[str, ...]) -> tuple[str, ...]:
     target = Path(target_path)
@@ -1073,40 +1109,9 @@ def resolve_paths(target_path: str, recursive: bool, supported_formats: tuple[st
     else:
         raise ValueError(f"'{target_path}' is not a valid file or directory.")
 
-def resolve_args(
-    search_word: Optional[str],
-    target_path: Optional[str],
-    use_fuzzy: Optional[bool],
-    recursive: Optional[bool],
-    output_format: Optional[str],
-    verbosity: Optional[int],
-    use_exact: Optional[bool]
-) -> argparse.Namespace:
-    # CLI takes over if not explicitly set
-    cli_args = parse_args()
-    return argparse.Namespace(
-        search_word = search_word or cli_args.search_word,
-        target_path = target_path or cli_args.target_path,
-        use_fuzzy = use_fuzzy if use_fuzzy is not None else cli_args.use_fuzzy,
-        recursive = recursive if recursive is not None else cli_args.recursive,
-        format = output_format or cli_args.format,
-        verbosity = verbosity if verbosity is not None else cli_args.verbose,
-        use_exact = use_exact if use_exact is not None else cli_args.use_exact
-    )
-
-def main(
-    search_word: Optional[str] = None,
-    target_path: Optional[str] = None,
-    use_fuzzy: Optional[bool] = None,
-    recursive: Optional[bool] = None,
-    output_format: Optional[str] = None,
-    verbosity: Optional[int] = None,
-    use_exact: Optional[bool] = None
-) -> None:
+def imajin_search(args: argparse.Namespace) -> None:
     try:
         global tokenize_with_positions
-
-        args = resolve_args(search_word, target_path, use_fuzzy, recursive, output_format, verbosity, use_exact)
 
         # Map verbosity to logging levels
         log_level = {
@@ -1122,7 +1127,7 @@ def main(
 
         logging.info(f"Search term: {args.search_word}")
         logging.info(f"Target path: {args.target_path}")
-        logging.info(f"Recursive: {args.recursive}, Fuzzy: {args.use_fuzzy}, Format: {args.format}")
+        logging.info(f"Recursive: {args.recursive}, Match: {args.match}, Format: {args.format}")
 
         mecab = None
 
@@ -1152,7 +1157,7 @@ def main(
                 futures = []
                 for path in paths:
                     if path.endswith(supported_formats):
-                        futures.append(executor.submit(safe_search_volume, path, args.search_word, mecab, args.use_fuzzy, args.use_exact))
+                        futures.append(executor.submit(safe_search_volume, path, args.search_word, mecab, args.match))
 
                 output_manager.output_global_header()
                 first = True
@@ -1173,6 +1178,13 @@ def main(
     except KeyboardInterrupt:
         logging.info("Interrupted by user. Terminating...")
         sys.exit(0)
+
+def main(args: Optional[argparse.Namespace] = None) -> None:
+    if args is not None and not isinstance(args, argparse.Namespace):
+        raise TypeError("Expected argparse.Namespace or None for `main()` argument.")
+    if args is None:
+        args = get_args()
+    imajin_search(args)
 
 if __name__ == '__main__':
     main()
