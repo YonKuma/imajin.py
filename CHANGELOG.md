@@ -4,17 +4,17 @@
 
 ### Changed
 
--- **Breaking**: Main now takes an argparse Namespace object rather than individual values ([f66fcd3](https://github.com/YonKuma/imajin.py/commit/1d3568839451c9a8bdf1990a10405021a968c126))
+-- **Breaking**: Main now takes an argparse Namespace object rather than individual values ([1d35688](https://github.com/YonKuma/imajin.py/commit/1d3568839451c9a8bdf1990a10405021a968c126))
 
 ### Added
 
-- Search Srt and Ass subtitle files ([f9b93a3](https://github.com/YonKuma/imajin.py/commit/fb235ba23f583e62958646bbb113d48ac4a41fa8))
-- Selet search mode: exact, smart, and both ([f66fcd3](https://github.com/YonKuma/imajin.py/commit/1d3568839451c9a8bdf1990a10405021a968c126))
+- Search Srt and Ass subtitle files ([fb235ba](https://github.com/YonKuma/imajin.py/commit/fb235ba23f583e62958646bbb113d48ac4a41fa8))
+- Selet search mode: exact, smart, and both ([1d35688](https://github.com/YonKuma/imajin.py/commit/1d3568839451c9a8bdf1990a10405021a968c126))
 
 ### Fixed
 
-- Force UTF-8 encoding ([6e613d5](https://github.com/YonKuma/imajin.py/commit/f66fcd3c767cdfeccc0315b75fe673afa78537b4))
-- Fix search term highlighting on Windows 10+
+- Force UTF-8 encoding ([f66fcd3](https://github.com/YonKuma/imajin.py/commit/f66fcd3c767cdfeccc0315b75fe673afa78537b4))
+- Fix search term highlighting on Windows 10+ ([4d4d21e](https://github.com/YonKuma/imajin.py/commit/4d4d21e402ff8926465763547086e8acfdbfdc05))
 
 ## [v1.3.3](https://github.com/YonKuma/imajin.py/releases/tag/v1.3.3) - 2025-05-28
 

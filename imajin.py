@@ -35,7 +35,7 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.4.0b2"
+__version__ = "v1.4.0b2.post0"
 
 sys.stdout.reconfigure(encoding='utf-8') # type: ignore
 sys.stderr.reconfigure(encoding='utf-8') # type: ignore
