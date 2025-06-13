@@ -25,9 +25,8 @@ import zipfile
 import re
 import sys
 import json
-import warnings
+import os
 from json import JSONDecodeError
-from collections import defaultdict
 from functools import lru_cache
 from typing import List, Optional, Iterable, Any, TypeVar, Callable
 from typing_extensions import ParamSpec
@@ -36,10 +35,12 @@ from bs4 import BeautifulSoup, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-__version__ = "v1.4.0b1"
+__version__ = "v1.4.0b2"
 
 sys.stdout.reconfigure(encoding='utf-8') # type: ignore
 sys.stderr.reconfigure(encoding='utf-8') # type: ignore
+
+os.system("") # Activate ANSI on Windows 10+ Console
 
 P = ParamSpec("P")
 R = TypeVar("R")

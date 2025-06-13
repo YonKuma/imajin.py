@@ -14,6 +14,7 @@
 ### Fixed
 
 - Force UTF-8 encoding ([6e613d5](https://github.com/YonKuma/imajin.py/commit/f66fcd3c767cdfeccc0315b75fe673afa78537b4))
+- Fix search term highlighting on Windows 10+
 
 ## [v1.3.3](https://github.com/YonKuma/imajin.py/releases/tag/v1.3.3) - 2025-05-28
 
