@@ -1,6 +1,6 @@
 # imajin.py
 
-**imajin.py** is a search tool for `.epub` and `.mokuro` files, designed to help you find example sentences in your Japanese books and manga.
+**imajin.py** is a search tool for `.epub`, `.mokuro`, `.srt` and `.ass` files, designed to help you find example sentences in your Japanese media.
 
 ---
 
@@ -25,11 +25,11 @@
 
 ## Features
 
-- Search across unencrypted `.epub` (ebooks) and `.mokuro` (manga) files
-- Supports fuzzy matching for Japanese conjugations (optional)
+- Search across unencrypted `.epub` (ebooks), `.mokuro` (manga), and `.srt` and `.ass` (subtitled) files
+- Supports smart matching for Japanese conjugations (optional)
 - Supports searching individual words or phrases
 - Structured output: text, markdown, or JSON
-- Recursively search directories of books and manga
+- Recursively search directories of books, manga, and subtitles
 - Clean highlighted snippets showing surrounding context
 
 ---
@@ -74,8 +74,8 @@ Not recommended, because it's harder to update.
 Dependencies:
 - [beautifulsoup4](https://pypi.org/project/beautifulsoup4/)
 - [lxml](https://pypi.org/project/lxml/)
-- [mecab-python3](https://github.com/SamuraiT/mecab-python3) (optional; fuzzy matching will be disabled if MeCab is not available)
-- unidic-lite (optional; used for fuzzy matching. Other dictionaries should work but are harder to install)
+- [mecab-python3](https://github.com/SamuraiT/mecab-python3) (optional; smart matching will be disabled if MeCab is not available)
+- unidic-lite (optional; used for smart matching. Other dictionaries should work but are harder to install)
 
 ---
 
@@ -102,7 +102,7 @@ python imajin.py [options] <search_word> <file_or_directory>
 ### Options
 | Option | Description |
 |:-------|:------------|
-| `--no-fuzzy` | Disable fuzzy matching (only exact matches). |
+| `--match {exact, smart, both}` | Choose whether to use exact match only search (faster), smart search only (slower, less false positives, matches different conjucations), or the union of both (default: `both`). |
 | `-r`, `--recursive` | Recursively search subdirectories if a directory is specified. |
 | `--format {text,markdown,md,json}` | Choose output format (default: `text`). |
 | `-h`, `--help` | Show help message and exit. |
@@ -122,13 +122,13 @@ imajin 慌ただしい ./books/
 Find exact matches only, searching all subdirectories:
 
 ```bash
-imajin --no-fuzzy -r 慌ただしい ./novel-library/
+imajin --match=exact -r 慌ただしい ./novel-library/
 ```
 
 Get markdown-formatted results:
 
 ```bash
-imajin 慌ただしい ./books/ --format markdown
+imajin 慌ただしい ./books/ --format md
 ```
 
 Save the results in a JSON file for further processing:
@@ -145,10 +145,10 @@ Search for the word "慌ただしい" inside your book collection:
 python imajin.py 慌ただしい ./books/
 ```
 
-Find exact matches only, searching all subdirectories:
+Find smart matches only, searching all subdirectories:
 
 ```bash
-python imajin.py --no-fuzzy -r 慌ただしい ./novel-library/
+python imajin.py --match=smart -r 慌ただしい ./novel-library/
 ```
 
 Get markdown-formatted results:
@@ -179,7 +179,7 @@ This method works for all output formats (text, markdown/md, or JSON).
 
 ## Notes
 
-- If MeCab is not installed, fuzzy matching will be automatically disabled.
+- If MeCab is not installed, smart matching will be automatically disabled.
 
 ---
 
