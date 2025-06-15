@@ -1,6 +1,6 @@
 # Changelog
 
-## [v1.4.0] - 2025-06-15
+## [v1.4.0](https://github.com/YonKuma/imajin.py/releases/tag/v1.4.0) - 2025-06-15
 
 ### Changed
 

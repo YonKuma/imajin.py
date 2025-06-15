@@ -25,7 +25,7 @@
 
 ## Features
 
-- Search across unencrypted `.epub` (ebooks), `.mokuro` (manga), and `.srt` and `.ass` (subtitled) files
+- Search across unencrypted `.epub` (ebooks), `.mokuro` (manga), and `.srt` and `.ass` (subtitle) files
 - Supports smart matching for Japanese conjugations (optional)
 - Supports searching individual words or phrases
 - Structured output: text, markdown, or JSON
